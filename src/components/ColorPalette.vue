@@ -1,23 +1,46 @@
 <script setup>
-    import { ref, watch, onMounted } from "vue";
+    import { ref, watch, onMounted, onUnmounted } from "vue";
+    import { sessionId, eventBus, getPalette, replaceColor, deleteColor as apiDeleteColor } from "../api.js";
     
-    const sessionId = ref(localStorage.getItem("sessionId"));
     const palette = ref([]);
     
-    // Helper: tenta forçar refresh da grade (GridCanvas define window.refreshGrid())
-    function tryRefreshGrid() {
+    // Carrega a paleta usando o ID partilhado
+    async function loadPalette() {
+      if (!sessionId.value) {
+        palette.value = [];
+        return;
+      }
       try {
-        if (typeof window.refreshGrid === "function") {
-          window.refreshGrid();
-          return;
-        }
-        // fallback: trigger a custom event (opcional)
-        window.dispatchEvent(new Event("tramagrid:refresh"));
+        const data = await getPalette();
+        // Garante que é um array, dependendo do formato do backend
+        palette.value = Array.isArray(data) ? data : data.palette || [];
       } catch (e) {
-        console.warn("refreshGrid unavailable", e);
+        console.error("Erro ao carregar paleta:", e);
+        palette.value = [];
       }
     }
     
+    // 1. Reatividade: Se o ID da sessão mudar (ex: ao criar sessão), carrega a paleta
+    watch(sessionId, loadPalette, { immediate: true });
+    
+    // 2. Eventos: Se algo mudar (ex: gerou grade nova), recarrega
+    function onRefresh() {
+      loadPalette();
+      // Se quiser atualizar a grade visual também (caso o componente GridCanvas use o método global)
+      if (typeof window.refreshGrid === "function") {
+        window.refreshGrid();
+      }
+    }
+    
+    onMounted(() => {
+      eventBus.addEventListener('refresh', onRefresh);
+    });
+    
+    onUnmounted(() => {
+      eventBus.removeEventListener('refresh', onRefresh);
+    });
+    
+    // Funções de interação
     async function pickColor(index, currentHex) {
       const input = document.createElement("input");
       input.type = "color";
@@ -25,87 +48,25 @@
     
       input.onchange = async () => {
         try {
-          // aguarda a troca no backend
-          const res = await fetch(`/api/color/replace/${sessionId.value}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              index: index,
-              new_hex: input.value,
-            }),
-          });
-    
-          if (!res.ok) throw new Error("Erro ao trocar cor");
-    
-          // atualiza paleta lateral
-          await loadPalette();
-    
-          // pede ao GridCanvas para atualizar a grade
-          tryRefreshGrid();
+          await replaceColor(index, input.value);
+          // Não precisa chamar loadPalette() aqui porque o replaceColor no api.js dispara o evento 'refresh'
         } catch (e) {
           console.error(e);
           alert("Erro ao trocar cor");
         }
       };
-    
       input.click();
     }
     
     async function deleteColor(index) {
       if (!confirm("Deletar essa cor de todos os quadradinhos?")) return;
       try {
-        const res = await fetch(`/api/color/delete/${sessionId.value}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ index }),
-        });
-        if (!res.ok) throw new Error("Erro ao deletar cor");
-    
-        // recarrega paleta e grade
-        await loadPalette();
-        tryRefreshGrid();
+        await apiDeleteColor(index);
       } catch (e) {
         console.error(e);
         alert("Erro ao deletar cor");
       }
     }
-    
-    async function loadPalette() {
-      if (!sessionId.value) {
-        palette.value = [];
-        return;
-      }
-      try {
-        const res = await fetch(`/api/palette/${sessionId.value}`);
-        if (!res.ok) throw new Error("Palette fetch failed");
-        const data = await res.json();
-        // se o backend já devolve ordenado, use direto; senão:
-        palette.value = Array.isArray(data) ? data.sort((a, b) => b.count - a.count) : data.palette || [];
-      } catch (e) {
-        console.error(e);
-        palette.value = [];
-      }
-    }
-    
-    // sincroniza mudança de sessão
-    watch(
-      () => localStorage.getItem("sessionId"),
-      (newId) => {
-        sessionId.value = newId;
-        if (newId) loadPalette();
-        else palette.value = [];
-      },
-      { immediate: true }
-    );
-    
-    onMounted(() => {
-      if (sessionId.value) loadPalette();
-      // também escuta event fallback
-      window.addEventListener("tramagrid:refresh", () => {
-        // noop — GridCanvas já vai atualizar quando necessário, mas mantemos por segurança
-        loadPalette().catch(()=>{});
-      });
-    });
     </script>
     
     <template>
@@ -127,7 +88,7 @@
     </template>
     
     <style scoped>
-    /* mantém seu CSS atual — sem alterações */
+    /* O seu CSS original mantém-se inalterado */
     .color-palette { background: #1e1e1e; padding: 20px; border-radius: 12px; color: white; width: 320px; }
     h3 { margin: 0 0 16px 0; font-size: 1.1rem; }
     .colors { display: flex; flex-wrap: wrap; gap: 14px; }
@@ -137,4 +98,3 @@
     .delete { position: absolute; top: -10px; right: -10px; width: 28px; height: 28px; background: #e74c3c; color: white; border: none; border-radius: 50%; font-size: 18px; cursor: pointer; opacity: 0; transition: opacity 0.2s; }
     .color-box:hover .delete { opacity: 1; }
     </style>
-    

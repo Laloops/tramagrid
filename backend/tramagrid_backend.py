@@ -391,30 +391,5 @@ class ClickData(BaseModel):
     click_y: float   # coordenada Y do clique dentro da imagem (já com zoom aplicado)
     zoom: float      # zoom atual no frontend
 
-@app.post("/api/calc_row/{session_id}")
-async def calculate_row_from_click(session_id: str, data: ClickData):
-    if session_id not in sessions:
-        raise HTTPException(404, "Sessão não encontrada")
-    
-    s = sessions[session_id]
-    
-    # Coordenadas reais (sem zoom)
-    real_y = data.click_y / data.zoom
-    margin = 50
-    cell_size = 22
-    
-    # Está dentro da área da grade?
-    if real_y < margin:
-        return {"row": -1}
-    
-    row_zero_based = int((real_y - margin) // cell_size)
-    max_rows = s.quantized.height if s.quantized else 0
-    
-    if row_zero_based < 0 or row_zero_based >= max_rows:
-        return {"row": -1}
-    
-    row_one_based = row_zero_based + 1
-    return {"row": row_one_based}
-
 
 # Executar com: uvicorn tramagrid_backend:app --reload
