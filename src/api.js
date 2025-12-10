@@ -113,3 +113,9 @@ export async function deleteColor(index) {
   })
   eventBus.dispatchEvent(new Event('refresh'))
 }
+
+export async function getParams() {
+  if (!sessionId.value) return {}
+  const res = await fetch(`${API_BASE}/api/params/${sessionId.value}`)
+  return await res.json()
+}

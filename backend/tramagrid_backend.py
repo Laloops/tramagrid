@@ -22,6 +22,8 @@ class TramaGridSession:
         self.custom_palette: Dict[int, Tuple[int, int, int]] = {}
         self.grid_image: Optional[Image.Image] = None
         self.history: List[Dict[str, Any]] = []
+        self.gamma: float = 1.0
+        self.posterize: int = 8
         
         # Parâmetros
         self.grid_width_cells: int = 130
@@ -34,25 +36,60 @@ class TramaGridSession:
         self.saturation: float = 1.0
         self.gamma: float = 1.0
         self.posterize: int = 8  # 1 a 8
+        self.gauge_stitches: int = 20 # Pontos em 10cm (largura)
+        self.gauge_rows: int = 20     # Carreiras em 10cm (altura)
+        self.show_grid: bool = True   # Controle para esconder a grade
 
     def _save_state(self):
-        """Salva o estado atual para o Undo."""
+        """Salva imagem, paletas E PARÂMETROS no histórico."""
         if not self.quantized: return
         if len(self.history) >= 20: self.history.pop(0)
+        
+        # Cria um snapshot completo do estado atual
         state = {
             'quantized': self.quantized.copy(),
             'palette': self.palette.copy(),
-            'custom_palette': self.custom_palette.copy()
+            'custom_palette': self.custom_palette.copy(),
+            'params': {
+                'grid_width_cells': self.grid_width_cells,
+                'max_colors': self.max_colors,
+                'brightness': self.brightness,
+                'contrast': self.contrast,
+                'saturation': self.saturation,
+                'gamma': self.gamma,
+                'posterize': self.posterize,
+                'gauge_stitches': self.gauge_stitches,
+                'gauge_rows': self.gauge_rows,
+                'show_grid': self.show_grid,
+                'highlighted_row': self.highlighted_row
+            }
         }
         self.history.append(state)
 
     def undo(self):
-        """Reverte para o último estado."""
+        """Reverte para o estado anterior (imagem + parâmetros)."""
         if not self.history: return
         state = self.history.pop()
+        
+        # Restaura imagens e cores
         self.quantized = state['quantized']
         self.palette = state['palette']
         self.custom_palette = state['custom_palette']
+        
+        # Restaura parâmetros (usando .get para segurança)
+        p = state.get('params', {})
+        self.grid_width_cells = p.get('grid_width_cells', self.grid_width_cells)
+        self.max_colors = p.get('max_colors', self.max_colors)
+        self.brightness = p.get('brightness', self.brightness)
+        self.contrast = p.get('contrast', self.contrast)
+        self.saturation = p.get('saturation', self.saturation)
+        self.gamma = p.get('gamma', self.gamma)
+        self.posterize = p.get('posterize', self.posterize)
+        self.gauge_stitches = p.get('gauge_stitches', self.gauge_stitches)
+        self.gauge_rows = p.get('gauge_rows', self.gauge_rows)
+        self.show_grid = p.get('show_grid', self.show_grid)
+        self.highlighted_row = p.get('highlighted_row', self.highlighted_row)
+        
         self._draw_grid()
 
     def load_image(self, file_bytes: bytes) -> None:
@@ -86,9 +123,17 @@ class TramaGridSession:
         if self.contrast != 1.0:
             img = ImageEnhance.Contrast(img).enhance(self.contrast)
 
+        # --- CÁLCULO DO GAUGE (NOVO) ---
+        # Razão = (Pontos por cm) / (Carreiras por cm)
+        # Se tenho 20 pontos e 10 carreiras em 10cm, o ponto é largo (ratio = 2.0)
+        # Precisamos ajustar a altura da imagem proporcionalmente.
+        pixel_aspect_ratio = self.gauge_stitches / max(1, self.gauge_rows)
+        
         w, h = img.size
-        new_w = max(10, self.grid_width_cells) 
-        new_h = int(h * new_w / w)
+        new_w = max(10, self.grid_width_cells)
+        
+        # Ajusta a altura baseada na proporção da imagem original E na proporção do ponto
+        new_h = int((h / w) * new_w * pixel_aspect_ratio)
         
         self.processed = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
         
@@ -108,51 +153,81 @@ class TramaGridSession:
 
     def _draw_grid(self) -> None:
         if not self.quantized: return
+        
+        # Se o usuário desligou a grade, geramos apenas a imagem limpa ampliada
+        if not self.show_grid:
+            # Apenas amplia a imagem pixelada para o tamanho de visualização
+            margin = 50
+            w_cells, h_cells = self.quantized.size
+            total_w = margin + w_cells * self.cell_size + 20
+            total_h = margin + h_cells * self.cell_size + 20
+            
+            # Cria fundo branco
+            base = Image.new("RGBA", (total_w, total_h), (255, 255, 255, 255))
+            # Cola a imagem redimensionada (sem linhas)
+            preview = self.quantized.resize((w_cells * self.cell_size, h_cells * self.cell_size), Image.Resampling.NEAREST)
+            base.paste(preview, (margin, margin))
+            self.grid_image = base.convert("RGB")
+            return
+
         margin = 50
         w_cells, h_cells = self.quantized.size
         total_w = margin + w_cells * self.cell_size + 20
         total_h = margin + h_cells * self.cell_size + 20
         
-        grid = Image.new("RGB", (total_w, total_h), "white")
-        draw = ImageDraw.Draw(grid)
-        
-        # Pixels
+        # 1. Criar Imagem Base (Branca)
+        base = Image.new("RGBA", (total_w, total_h), (255, 255, 255, 255))
+        draw_base = ImageDraw.Draw(base)
+
+        # 2. Desenhar os Pixels Coloridos
         for y in range(h_cells):
             for x in range(w_cells):
                 idx = self.quantized.getpixel((x, y))
                 color = self.palette.get(idx, (255, 255, 255))
+                # Desenha o retângulo sólido na base
                 px = margin + x * self.cell_size
                 py = margin + y * self.cell_size
-                draw.rectangle([px, py, px + self.cell_size - 1, py + self.cell_size - 1], fill=color)
+                draw_base.rectangle([px, py, px + self.cell_size, py + self.cell_size], fill=color)
 
-        # Linhas Suaves
-        line_color_thin = (235, 235, 235)
-        line_color_thick = (160, 160, 160)
-        text_color = "#888"
+        # 3. Criar Camada de Sobreposição (Transparente) para as Linhas
+        overlay = Image.new("RGBA", (total_w, total_h), (255, 255, 255, 0))
+        draw_overlay = ImageDraw.Draw(overlay)
 
+        # Configuração das Linhas (RGBA: r, g, b, alpha)
+        # Alpha 80 = ~30% de opacidade (bem suave)
+        line_color_thin = (255, 255, 255, 70)   
+        line_color_thick = (255, 255, 255, 180) # Mais forte para marcações de 10 em 10
+        text_color = (100, 100, 100, 255)
+
+        # Desenhar Linhas Horizontais
         for y in range(h_cells + 1):
             py = margin + y * self.cell_size
             is_thick = (y % 10 == 0) or (y == 0) or (y == h_cells)
             fill = line_color_thick if is_thick else line_color_thin
             width = 2 if is_thick else 1
-            draw.line([(margin, py), (margin + w_cells * self.cell_size, py)], fill=fill, width=width)
+            draw_overlay.line([(margin, py), (margin + w_cells * self.cell_size, py)], fill=fill, width=width)
 
+        # Desenhar Linhas Verticais
         for x in range(w_cells + 1):
             px = margin + x * self.cell_size
             is_thick = (x % 10 == 0) or (x == 0) or (x == w_cells)
             fill = line_color_thick if is_thick else line_color_thin
             width = 2 if is_thick else 1
-            draw.line([(px, margin), (px, margin + h_cells * self.cell_size)], fill=fill, width=width)
+            draw_overlay.line([(px, margin), (px, margin + h_cells * self.cell_size)], fill=fill, width=width)
         
-        # Numeração
+        # 4. Fundir a Camada de Linhas sobre a Base
+        combined = Image.alpha_composite(base, overlay)
+        draw_combined = ImageDraw.Draw(combined)
+
+        # Numeração (Desenhamos por cima de tudo, sólido)
         for x in range(w_cells):
             if (x + 1) % 5 == 0 or x == 0:
-                 draw.text((margin + x * self.cell_size + 11, 25), str(x + 1), fill=text_color, anchor="mm")
+                 draw_combined.text((margin + x * self.cell_size + 11, 25), str(x + 1), fill=text_color, anchor="mm")
         for y in range(h_cells):
             if (y + 1) % 5 == 0 or y == 0:
-                draw.text((20, margin + y * self.cell_size + 11), str(y + 1), fill=text_color, anchor="mm")
+                draw_combined.text((20, margin + y * self.cell_size + 11), str(y + 1), fill=text_color, anchor="mm")
                 
-        self.grid_image = grid
+        self.grid_image = combined.convert("RGB")
 
     def get_palette_info(self) -> List[Dict]:
         if not self.quantized: return []
@@ -301,6 +376,10 @@ class ParamsUpdate(BaseModel):
     gamma: Optional[float] = None
     posterize: Optional[int] = None
     highlighted_row: Optional[int] = None
+    # NOVOS
+    gauge_stitches: Optional[int] = None
+    gauge_rows: Optional[int] = None
+    show_grid: Optional[bool] = None
 
 class ColorReplace(BaseModel):
     index: int
@@ -350,6 +429,7 @@ async def palette(session_id: str):
 async def update_params(session_id: str, data: ParamsUpdate):
     if session_id not in sessions: raise HTTPException(404, "Sessão expirada.")
     s = sessions[session_id]
+    s._save_state()
     if data.max_colors is not None: s.max_colors = data.max_colors
     if data.grid_width_cells is not None: s.grid_width_cells = data.grid_width_cells
     if data.brightness is not None: s.brightness = data.brightness
@@ -358,6 +438,14 @@ async def update_params(session_id: str, data: ParamsUpdate):
     if data.gamma is not None: s.gamma = data.gamma
     if data.posterize is not None: s.posterize = data.posterize
     if data.highlighted_row is not None: s.highlighted_row = data.highlighted_row
+    if data.posterize is not None: s.posterize = data.posterize
+    if data.highlighted_row is not None: s.highlighted_row = data.highlighted_row
+    # NOVOS
+    if data.gauge_stitches is not None: s.gauge_stitches = data.gauge_stitches
+    if data.gauge_rows is not None: s.gauge_rows = data.gauge_rows
+    if data.show_grid is not None: 
+        s.show_grid = data.show_grid
+        s._draw_grid() # Se mudou a visibilidade, redesenha
     return {"message": "Parâmetros atualizados"}
 
 @app.post("/api/color/replace/{session_id}")
@@ -406,3 +494,21 @@ async def get_grid(session_id: str):
     if session_id not in sessions: raise HTTPException(404)
     b64 = sessions[session_id].get_grid_base64()
     return {"image_base64": b64}
+
+@app.get("/api/params/{session_id}")
+async def get_params(session_id: str):
+    if session_id not in sessions: return {}
+    s = sessions[session_id]
+    return {
+        "max_colors": s.max_colors,
+        "grid_width_cells": s.grid_width_cells,
+        "brightness": s.brightness,
+        "contrast": s.contrast,
+        "saturation": s.saturation,
+        "gamma": s.gamma,
+        "posterize": s.posterize,
+        "gauge_stitches": s.gauge_stitches,
+        "gauge_rows": s.gauge_rows,
+        "show_grid": s.show_grid,
+        "highlighted_row": s.highlighted_row
+    }

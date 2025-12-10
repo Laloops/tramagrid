@@ -7,6 +7,7 @@
   import { createSession } from './api.js'
   
   const isReady = ref(false)
+  const isSidebarOpen = ref(true) // Estado do menu lateral
   
   onMounted(async () => {
     try {
@@ -28,7 +29,18 @@
     <TopToolbar />
 
     <div class="main-layout">
-      <aside class="sidebar custom-scroll">
+      <button 
+        v-if="!isSidebarOpen" 
+        class="toggle-sidebar-floating"
+        @click="isSidebarOpen = true"
+        title="Abrir Menu"
+      >➤</button>
+
+      <aside class="sidebar custom-scroll" :class="{ closed: !isSidebarOpen }">
+        <div class="sidebar-header">
+            <button @click="isSidebarOpen = false" class="close-btn" title="Recolher Menu">◀</button>
+        </div>
+        
         <ProjectControls />
         <ColorPalette />
       </aside>
@@ -41,37 +53,12 @@
 </template>
   
 <style scoped>
-.loading { 
-  height: 100vh; 
-  display: flex; 
-  flex-direction: column; 
-  justify-content: center; 
-  align-items: center; 
-  background: #1a1a1a; 
-  color: #aaa; 
-  gap: 15px;
-}
-.spinner {
-  width: 40px; height: 40px;
-  border: 4px solid #333;
-  border-top-color: #e67e22;
-  border-radius: 50%;
-  animation: spin 1s linear infinite;
-}
+.loading { height: 100vh; display: flex; flex-direction: column; justify-content: center; align-items: center; background: #1a1a1a; color: #aaa; gap: 15px; }
+.spinner { width: 40px; height: 40px; border: 4px solid #333; border-top-color: #e67e22; border-radius: 50%; animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.app { 
-  height: 100vh; 
-  display: flex; 
-  flex-direction: column; 
-  background-color: #121212;
-}
-
-.main-layout { 
-  flex: 1; 
-  display: flex; 
-  overflow: hidden; 
-}
+.app { height: 100vh; display: flex; flex-direction: column; background-color: #121212; }
+.main-layout { flex: 1; display: flex; overflow: hidden; position: relative; }
 
 .sidebar { 
   width: 320px; 
@@ -82,14 +69,27 @@
   flex-direction: column; 
   gap: 10px;
   border-right: 1px solid #333;
-}
-
-.canvas-area { 
-  flex: 1; 
-  background: #0f0f0f; 
-  overflow: hidden; 
+  transition: all 0.3s ease-in-out; /* Animação suave */
   position: relative;
 }
+
+/* Quando fechado, largura zero e padding zero */
+.sidebar.closed { width: 0; padding: 0; overflow: hidden; border: none; }
+
+.sidebar-header { display: flex; justify-content: flex-end; margin-bottom: 10px; }
+.close-btn { background: none; border: none; color: #888; cursor: pointer; font-size: 1.2rem; padding: 0; }
+.close-btn:hover { color: white; }
+
+.toggle-sidebar-floating {
+    position: absolute; left: 10px; top: 10px; z-index: 50;
+    background: #333; color: #fff; border: 1px solid #555;
+    width: 30px; height: 30px; border-radius: 50%;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    box-shadow: 2px 2px 5px rgba(0,0,0,0.5);
+}
+.toggle-sidebar-floating:hover { background: #e67e22; border-color: #e67e22; }
+
+.canvas-area { flex: 1; background: #0f0f0f; overflow: hidden; position: relative; }
 
 .custom-scroll::-webkit-scrollbar { width: 8px; }
 .custom-scroll::-webkit-scrollbar-track { background: #1e1e1e; }

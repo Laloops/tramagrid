@@ -117,63 +117,47 @@
     </template>
     
     <style scoped>
-    /* Estilo de PAINEL FLUTUANTE e não modal */
-    .smart-panel {
-      position: fixed;
-      top: 80px; right: 20px;
-      width: 320px; max-height: calc(100vh - 100px);
-      background: #252526; 
-      border: 1px solid #444; border-radius: 8px;
-      box-shadow: 0 5px 20px rgba(0,0,0,0.5);
-      display: flex; flex-direction: column;
-      z-index: 1000;
-      color: #ddd;
-    }
-    
-    .header {
-      padding: 12px 15px; background: #2c2c2c; border-bottom: 1px solid #333;
-      display: flex; justify-content: space-between; align-items: center;
-      border-top-left-radius: 8px; border-top-right-radius: 8px;
-    }
-    .header h3 { margin: 0; font-size: 1rem; color: #e67e22; }
-    .close { background: none; border: none; color: #aaa; cursor: pointer; font-size: 1.2rem; }
-    
-    .content { padding: 10px; display: flex; flex-direction: column; overflow: hidden; }
-    
-    .strategies {
-      display: flex; gap: 10px; justify-content: space-between;
-      margin-bottom: 10px; font-size: 0.8rem;
-    }
-    .strategies label { cursor: pointer; display: flex; align-items: center; gap: 4px; }
-    .strategies input { accent-color: #e67e22; }
-    
-    .list { overflow-y: auto; flex: 1; padding-right: 5px; max-height: 60vh; }
-    
-    .group-row {
-      display: flex; justify-content: space-between; align-items: center;
-      background: rgba(0,0,0,0.2); padding: 8px; margin-bottom: 8px;
-      border-radius: 6px; transition: opacity 0.3s;
-    }
-    .group-row.done { opacity: 0.2; pointer-events: none; }
-    
-    .colors-preview { display: flex; gap: 4px; flex-wrap: wrap; max-width: 55%; }
-    .swatch {
-      width: 20px; height: 20px; border-radius: 50%;
-      border: 1px solid transparent; cursor: pointer;
-    }
-    .swatch.selected { border-color: white; transform: scale(1.2); z-index: 2; box-shadow: 0 0 4px white; }
-    
-    .actions { display: flex; align-items: center; gap: 8px; }
-    .final-swatch { width: 24px; height: 24px; border-radius: 4px; border: 1px solid #555; }
-    .btn-merge {
-      background: #27ae60; border: none; color: white;
-      padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 0.8rem; font-weight: bold;
-    }
-    .btn-merge:hover { background: #2ecc71; }
-    
-    .loading, .empty { padding: 20px; text-align: center; color: #888; font-size: 0.9rem; }
-    
-    /* Scrollbar */
-    .custom-scroll::-webkit-scrollbar { width: 6px; }
-    .custom-scroll::-webkit-scrollbar-thumb { background: #444; border-radius: 3px; }
-    </style>
+/* Estilo de PAINEL FLUTUANTE na Direita */
+.smart-panel {
+  position: fixed;
+  top: 50%;           /* Meio da tela vertical */
+  right: 80px;        /* Um pouco afastado da borda direita para não colar */
+  transform: translateY(-50%); /* Centralização exata */
+  
+  width: 300px; 
+  max-height: 80vh;
+  
+  background: #252526; 
+  border: 1px solid #444; border-radius: 12px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.7); /* Sombra forte para destacar */
+  display: flex; flex-direction: column;
+  z-index: 2000; /* Bem alto para ficar acima de tudo */
+  color: #ddd;
+}
+
+/* ... (O resto do CSS interno: .header, .content, etc. pode manter igual, só mudamos a posição acima) ... */
+.header {
+  padding: 12px 15px; background: #2c2c2c; border-bottom: 1px solid #333;
+  display: flex; justify-content: space-between; align-items: center;
+  border-top-left-radius: 12px; border-top-right-radius: 12px;
+}
+.header h3 { margin: 0; font-size: 1rem; color: #e67e22; }
+.close { background: none; border: none; color: #aaa; cursor: pointer; font-size: 1.2rem; }
+.content { padding: 10px; display: flex; flex-direction: column; overflow: hidden; }
+.strategies { display: flex; gap: 10px; justify-content: space-between; margin-bottom: 10px; font-size: 0.8rem; }
+.strategies label { cursor: pointer; display: flex; align-items: center; gap: 4px; }
+.strategies input { accent-color: #e67e22; }
+.list { overflow-y: auto; flex: 1; padding-right: 5px; max-height: 60vh; }
+.group-row { display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.2); padding: 8px; margin-bottom: 8px; border-radius: 6px; transition: opacity 0.3s; }
+.group-row.done { opacity: 0.2; pointer-events: none; }
+.colors-preview { display: flex; gap: 4px; flex-wrap: wrap; max-width: 55%; }
+.swatch { width: 20px; height: 20px; border-radius: 50%; border: 1px solid transparent; cursor: pointer; }
+.swatch.selected { border-color: white; transform: scale(1.2); z-index: 2; box-shadow: 0 0 4px white; }
+.actions { display: flex; align-items: center; gap: 8px; }
+.final-swatch { width: 24px; height: 24px; border-radius: 4px; border: 1px solid #555; }
+.btn-merge { background: #27ae60; border: none; color: white; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 0.8rem; font-weight: bold; }
+.btn-merge:hover { background: #2ecc71; }
+.loading, .empty { padding: 20px; text-align: center; color: #888; font-size: 0.9rem; }
+.custom-scroll::-webkit-scrollbar { width: 6px; }
+.custom-scroll::-webkit-scrollbar-thumb { background: #444; border-radius: 3px; }
+</style>
