@@ -1,5 +1,5 @@
 # filename: tramagrid_backend.py
-from PIL import Image, ImageDraw, ImageEnhance
+from PIL import Image, ImageDraw, ImageEnhance, ImageOps
 import math
 from collections import defaultdict
 import io
@@ -8,70 +8,115 @@ import uuid
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, Dict, Tuple, List
+from typing import Optional, Dict, Tuple, List, Any
 
-# Armazenamento em memória das sessões (em produção use Redis ou banco de dados)
+# Armazenamento em memória (reinicia com o servidor)
 sessions: Dict[str, "TramaGridSession"] = {}
 
 class TramaGridSession:
-    """Classe que contém todo o estado e lógica do conversor de imagem → grade de tricô/crochê"""
     def __init__(self):
         self.original: Optional[Image.Image] = None
         self.processed: Optional[Image.Image] = None
         self.quantized: Optional[Image.Image] = None
-        self.palette: Dict[int, Tuple[int, int, int]] = {}  # paleta atual (índice → RGB)
-        self.custom_palette: Dict[int, Tuple[int, int, int]] = {}  # alterações feitas pelo usuário
+        self.palette: Dict[int, Tuple[int, int, int]] = {}
+        self.custom_palette: Dict[int, Tuple[int, int, int]] = {}
         self.grid_image: Optional[Image.Image] = None
-        self.grid_width_cells: int = 130  # largura em “pontos” (células)
+        self.history: List[Dict[str, Any]] = []
+        
+        # Parâmetros
+        self.grid_width_cells: int = 130
         self.cell_size: int = 22
         self.zoom: float = 1.0
         self.highlighted_row: int = -1
         self.max_colors: int = 64
         self.brightness: float = 1.0
         self.contrast: float = 1.0
+        self.saturation: float = 1.0
+        self.gamma: float = 1.0
+        self.posterize: int = 8  # 1 a 8
 
-    # ------------------------------------------------------------------
-    # Carregamento e geração inicial
-    # ------------------------------------------------------------------
+    def _save_state(self):
+        """Salva o estado atual para o Undo."""
+        if not self.quantized: return
+        if len(self.history) >= 20: self.history.pop(0)
+        state = {
+            'quantized': self.quantized.copy(),
+            'palette': self.palette.copy(),
+            'custom_palette': self.custom_palette.copy()
+        }
+        self.history.append(state)
+
+    def undo(self):
+        """Reverte para o último estado."""
+        if not self.history: return
+        state = self.history.pop()
+        self.quantized = state['quantized']
+        self.palette = state['palette']
+        self.custom_palette = state['custom_palette']
+        self._draw_grid()
+
     def load_image(self, file_bytes: bytes) -> None:
         self.original = Image.open(io.BytesIO(file_bytes)).convert("RGB")
+        self.history = []
 
     def generate_grid(self) -> None:
-        if not self.original:
-            raise ValueError("Nenhuma imagem carregada")
+        if not self.original: return
+        
         img = self.original.copy()
-        img = ImageEnhance.Brightness(img).enhance(self.brightness)
-        img = ImageEnhance.Contrast(img).enhance(self.contrast)
+        
+        # 1. Posterização
+        if self.posterize < 8:
+            bits = max(1, min(8, int(self.posterize)))
+            img = ImageOps.posterize(img, bits)
+
+        # 2. Gama (Sombras)
+        if self.gamma != 1.0 and self.gamma > 0:
+            inv_gamma = 1.0 / self.gamma
+            # Tabela de correção de gama (deve ser inteiros)
+            table = [int(((i / 255.0) ** inv_gamma) * 255) for i in range(256)]
+            img = img.point(table * 3)
+
+        # 3. Saturação
+        if self.saturation != 1.0:
+            img = ImageEnhance.Color(img).enhance(self.saturation)
+
+        # 4. Brilho e Contraste
+        if self.brightness != 1.0:
+            img = ImageEnhance.Brightness(img).enhance(self.brightness)
+        if self.contrast != 1.0:
+            img = ImageEnhance.Contrast(img).enhance(self.contrast)
+
         w, h = img.size
-        new_w = self.grid_width_cells
+        new_w = max(10, self.grid_width_cells) 
         new_h = int(h * new_w / w)
+        
         self.processed = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        
         self.quantized = self.processed.quantize(
             colors=self.max_colors, method=Image.MEDIANCUT, dither=Image.FLOYDSTEINBERG
         )
-        # Reconstrói a paleta a partir da quantização
+        
         raw_palette = self.quantized.getpalette()[:self.max_colors * 3]
         base_palette = {}
         for i in range(self.max_colors):
-            r, g, b = raw_palette[i*3:i*3+3]
-            base_palette[i] = (r, g, b)
-        # Mescla com as cores customizadas pelo usuário (elas prevalecem)
+            if i * 3 + 2 < len(raw_palette):
+                r, g, b = raw_palette[i*3:i*3+3]
+                base_palette[i] = (r, g, b)
+        
         self.palette = {i: self.custom_palette.get(i, cor) for i, cor in base_palette.items()}
         self._draw_grid()
 
-    # ------------------------------------------------------------------
-    # Desenho da grade com numeração e linhas de 10 em 10
-    # ------------------------------------------------------------------
     def _draw_grid(self) -> None:
-        if not self.quantized:
-            return
+        if not self.quantized: return
         margin = 50
         w_cells, h_cells = self.quantized.size
         total_w = margin + w_cells * self.cell_size + 20
         total_h = margin + h_cells * self.cell_size + 20
+        
         grid = Image.new("RGB", (total_w, total_h), "white")
         draw = ImageDraw.Draw(grid)
-        # Quadrados + linhas finas
+        
+        # Pixels
         for y in range(h_cells):
             for x in range(w_cells):
                 idx = self.quantized.getpixel((x, y))
@@ -79,217 +124,182 @@ class TramaGridSession:
                 px = margin + x * self.cell_size
                 py = margin + y * self.cell_size
                 draw.rectangle([px, py, px + self.cell_size - 1, py + self.cell_size - 1], fill=color)
-                if x < w_cells - 1:
-                    draw.line([(px + self.cell_size - 1, py), (px + self.cell_size - 1, py + self.cell_size - 1)], fill=(200, 200, 200))
-                if y < h_cells - 1:
-                    draw.line([(px, py + self.cell_size - 1), (px + self.cell_size - 1, py + self.cell_size - 1)], fill=(200, 200, 200))
-                if x % 10 == 0 and x > 0:
-                    draw.line([(px - 1, py), (px - 1, py + self.cell_size)], fill="black", width=3)
-                if y % 10 == 0 and y > 0:
-                    draw.line([(px, py - 1), (px + self.cell_size, py - 1)], fill="black", width=3)
-        # Numeração horizontal e vertical
+
+        # Linhas Suaves
+        line_color_thin = (235, 235, 235)
+        line_color_thick = (160, 160, 160)
+        text_color = "#888"
+
+        for y in range(h_cells + 1):
+            py = margin + y * self.cell_size
+            is_thick = (y % 10 == 0) or (y == 0) or (y == h_cells)
+            fill = line_color_thick if is_thick else line_color_thin
+            width = 2 if is_thick else 1
+            draw.line([(margin, py), (margin + w_cells * self.cell_size, py)], fill=fill, width=width)
+
+        for x in range(w_cells + 1):
+            px = margin + x * self.cell_size
+            is_thick = (x % 10 == 0) or (x == 0) or (x == w_cells)
+            fill = line_color_thick if is_thick else line_color_thin
+            width = 2 if is_thick else 1
+            draw.line([(px, margin), (px, margin + h_cells * self.cell_size)], fill=fill, width=width)
+        
+        # Numeração
         for x in range(w_cells):
-            draw.text((margin + x * self.cell_size + 11, 25), str(x + 1), fill="#333", anchor="mm")
+            if (x + 1) % 5 == 0 or x == 0:
+                 draw.text((margin + x * self.cell_size + 11, 25), str(x + 1), fill=text_color, anchor="mm")
         for y in range(h_cells):
-            draw.text((20, margin + y * self.cell_size + 11), str(y + 1), fill="#333", anchor="mm")
+            if (y + 1) % 5 == 0 or y == 0:
+                draw.text((20, margin + y * self.cell_size + 11), str(y + 1), fill=text_color, anchor="mm")
+                
         self.grid_image = grid
 
-    # ------------------------------------------------------------------
-    # Informações da paleta (para o frontend)
-    # ------------------------------------------------------------------
     def get_palette_info(self) -> List[Dict]:
-        if not self.quantized:
-            return []
+        if not self.quantized: return []
         usage = defaultdict(int)
         w, h = self.quantized.size
         for y in range(h):
             for x in range(w):
                 idx = self.quantized.getpixel((x, y))
-                if idx in self.palette:
-                    usage[idx] += 1
+                if idx in self.palette: usage[idx] += 1
         result = []
         for idx, count in sorted(usage.items(), key=lambda item: -item[1]):
             r, g, b = self.palette[idx]
-            result.append({
-                "index": idx,
-                "hex": f"#{r:02x}{g:02x}{b:02x}",
-                "count": count
-            })
+            result.append({"index": idx, "hex": f"#{r:02x}{g:02x}{b:02x}", "count": count})
         return result
 
-    # ------------------------------------------------------------------
-    # Alteração de cor individual
-    # ------------------------------------------------------------------
     def replace_color(self, index: int, new_hex: str) -> None:
-        if index not in self.palette:
-            raise ValueError("Índice de cor inválido")
+        if index not in self.palette: return
+        self._save_state()
         r = int(new_hex[1:3], 16)
         g = int(new_hex[3:5], 16)
         b = int(new_hex[5:7], 16)
-        new_rgb = (r, g, b)
-        self.custom_palette[index] = new_rgb
-        self.palette[index] = new_rgb
+        self.custom_palette[index] = (r, g, b)
+        self.palette[index] = (r, g, b)
         self._draw_grid()
 
-    # ------------------------------------------------------------------
-    # Deleção e fusão de cor
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _color_distance(c1: Tuple[int, int, int], c2: Tuple[int, int, int]) -> float:
-        return math.sqrt(sum((a - b) ** 2 for a, b in zip(c1, c2)))
-
-    def _nearest_color_index(self, color: Tuple[int, int, int], ignore: Optional[int] = None) -> Optional[int]:
-        best_idx = None
-        best_dist = float('inf')
-        for idx, c in self.palette.items():
-            if idx == ignore:
-                continue
-            d = self._color_distance(color, c)
-            if d < best_dist:
-                best_dist = d
-                best_idx = idx
-        return best_idx
-
     def delete_color(self, index_to_remove: int) -> None:
-        if index_to_remove not in self.palette:
-            raise ValueError("Cor não existe na paleta")
-        nearest = self._nearest_color_index(self.palette[index_to_remove], ignore=index_to_remove)
-        if nearest is None:
-            raise ValueError("Não há outra cor para mesclar")
+        if index_to_remove not in self.palette: return
+        self._save_state()
+        c1 = self.palette[index_to_remove]
+        best_idx = None
+        min_dist = float('inf')
+        for idx, c2 in self.palette.items():
+            if idx == index_to_remove: continue
+            dist = math.sqrt(sum((a - b) ** 2 for a, b in zip(c1, c2)))
+            if dist < min_dist: min_dist = dist; best_idx = idx
+        if best_idx is None: return
         w, h = self.quantized.size
         for y in range(h):
             for x in range(w):
                 if self.quantized.getpixel((x, y)) == index_to_remove:
-                    self.quantized.putpixel((x, y), nearest)
+                    self.quantized.putpixel((x, y), best_idx)
         self.custom_palette.pop(index_to_remove, None)
         self.palette.pop(index_to_remove, None)
-        self._reindex_palette()
         self._draw_grid()
 
-    def _reindex_palette(self) -> None:
-        old_indices = sorted(self.palette.keys())
-        mapping = {old: new for new, old in enumerate(old_indices)}
-        new_palette = {new: self.palette[old] for new, old in enumerate(old_indices)}
-        # Remapeia pixels
+    def paint_cell(self, x: int, y: int, color_index: int) -> None:
+        if not self.quantized: return
+        if color_index not in self.palette: return
+        self._save_state()
+        w, h = self.quantized.size
+        if 0 <= x < w and 0 <= y < h:
+            self.quantized.putpixel((x, y), color_index)
+            self._draw_grid()
+
+    def merge_colors(self, from_index: int, to_index: int) -> None:
+        if not self.quantized: return
+        if from_index not in self.palette or to_index not in self.palette: return
+        if from_index == to_index: return
+        self._save_state()
         w, h = self.quantized.size
         for y in range(h):
             for x in range(w):
-                old = self.quantized.getpixel((x, y))
-                self.quantized.putpixel((x, y), mapping.get(old, 0))
-        # Atualiza paleta customizada
-        new_custom = {mapping.get(k, k): v for k, v in self.custom_palette.items() if k in mapping}
-        self.palette = new_palette
-        self.custom_palette = new_custom
-
-    # ------------------------------------------------------------------
-    # Simplificação híbrida de paleta
-    # ------------------------------------------------------------------
-    def simplify_palette(self, intensity: int) -> None:  # 0 = muito detalhe, 100 = muito simplificado
-        if not self.palette:
-            return
-        max_dist = 300.0
-        threshold = (intensity / 100.0) * max_dist
-        # Agrupamento inicial por distância
-        groups: List[List[Tuple[int, Tuple[int, int, int]]]] = []
-        for idx, color in self.palette.items():
-            placed = False
-            for g in groups:
-                if self._color_distance(color, g[0][1]) <= threshold:
-                    g.append((idx, color))
-                    placed = True
-                    break
-            if not placed:
-                groups.append([(idx, color)])
-        # Quantidade desejada de cores finais
-        current_colors = len(self.palette)
-        target = max(1, 1 + int(current_colors * (100 - intensity) / 100.0))
-        # Mescla grupos pequenos até atingir o target
-        if len(groups) > target:
-            groups = sorted(groups, key=len)
-            while len(groups) > target:
-                small = groups.pop(0)
-                avg = tuple(sum(c[i] for _, c in small) // len(small) for i in range(3))
-                best_i = min(range(len(groups)), key=lambda i: self._color_distance(avg, groups[i][0][1]))
-                groups[best_i].extend(small)
-        # Cria nova paleta e mapeamento
-        old_to_new = {}
-        new_palette = {}
-        for new_idx, group in enumerate(groups):
-            avg = tuple(sum(c[i] for _, c in group) // len(group) for i in range(3))
-            new_palette[new_idx] = avg
-            for old_idx, _ in group:
-                old_to_new[old_idx] = new_idx
-        # Remapeia pixels
-        w, h = self.quantized.size
-        for y in range(h):
-            for x in range(w):
-                old = self.quantized.getpixel((x, y))
-                new = old_to_new.get(old)
-                if new is None:  # fallback
-                    old_rgb = self.palette.get(old, (0, 0, 0))
-                    new = min(new_palette.items(), key=lambda item: self._color_distance(old_rgb, item[1]))[0]
-                self.quantized.putpixel((x, y), new)
-        # Atualiza paleta customizada
-        self.custom_palette = {old_to_new.get(k, k): v for k, v in self.custom_palette.items() if k in old_to_new}
-        self.palette = new_palette
+                if self.quantized.getpixel((x, y)) == from_index:
+                    self.quantized.putpixel((x, y), to_index)
+        self.custom_palette.pop(from_index, None)
+        self.palette.pop(from_index, None)
         self._draw_grid()
 
-    def simplify_bw_smart(self) -> None:
-        if not self.palette:
-            return
-        lums = [0.299*r + 0.587*g + 0.114*b for r, g, b in self.palette.values()]
-        amplitude = max(lums) - min(lums) if lums else 0
-        intensity = 8 if amplitude < 30 else 20 if amplitude < 80 else 35
-        self.simplify_palette(intensity)
+    def get_pixel_index(self, x: int, y: int) -> int:
+        if not self.quantized: return -1
+        w, h = self.quantized.size
+        if 0 <= x < w and 0 <= y < h:
+            return int(self.quantized.getpixel((x, y)))
+        return -1
 
-    # ------------------------------------------------------------------
-    # Exportação da grade (base64 para o frontend)
-    # ------------------------------------------------------------------
+    def suggest_clusters(self, threshold: float = 50.0) -> List[List[int]]:
+        """Identifica grupos de cores visivelmente similares."""
+        if not self.palette: return []
+        colors = list(self.palette.items())
+        groups = []
+        visited = set()
+
+        def color_distance(c1, c2):
+            # Fórmula Redmean (aproximação da percepção humana)
+            r1, g1, b1 = c1
+            r2, g2, b2 = c2
+            rmean = (r1 + r2) // 2
+            r = int(r1) - int(r2)
+            g = int(g1) - int(g2)
+            b = int(b1) - int(b2)
+            return math.sqrt((((512+rmean)*r*r)>>8) + 4*g*g + (((767-rmean)*b*b)>>8))
+
+        for i in range(len(colors)):
+            idx1, rgb1 = colors[i]
+            if idx1 in visited: continue
+            current_group = [idx1]
+            for j in range(i + 1, len(colors)):
+                idx2, rgb2 = colors[j]
+                if idx2 in visited: continue
+                dist = color_distance(rgb1, rgb2)
+                if dist < threshold:
+                    current_group.append(idx2)
+                    visited.add(idx2)
+            if len(current_group) > 1:
+                visited.add(idx1)
+                groups.append(current_group)
+        return groups
+
     def get_grid_base64(self) -> str:
-        if not self.grid_image:
-            raise ValueError("Grade ainda não gerada")
+        if not self.grid_image: return ""
         img = self.grid_image.copy()
-        # Destaque de linha (se houver)
         if self.highlighted_row >= 0:
+            # Destaque de linha: escurece o que não é a linha
             overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
             draw = ImageDraw.Draw(overlay)
             m = 50
-            draw.rectangle([m, m, m + self.grid_width_cells*self.cell_size - 1, m + self.quantized.height*self.cell_size - 1], fill=(0, 0, 0, 140))
+            # Desenha tudo escuro
+            draw.rectangle([0, 0, img.width, img.height], fill=(0, 0, 0, 100))
+            # "Limpa" a área da linha (recorte)
             py = m + (self.highlighted_row - 1) * self.cell_size
-            draw.rectangle([m, py, m + self.grid_width_cells*self.cell_size - 1, py + self.cell_size - 1], fill=(0, 0, 0, 0))
+            # Truque: desenhar dois retangulos escuros (cima e baixo) deixa o meio claro
+            draw.rectangle([0, 0, img.width, py], fill=(0,0,0,160)) 
+            draw.rectangle([0, py + self.cell_size, img.width, img.height], fill=(0,0,0,160)) 
+            
             img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
-        # Zoom
-        if self.zoom != 1.0:
-            new_size = (int(img.width * self.zoom), int(img.height * self.zoom))
-            img = img.resize(new_size, Image.NEAREST)
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         return base64.b64encode(buf.getvalue()).decode()
 
-    def save_grid_to_disk(self, filepath: str) -> None:
-        if self.grid_image:
-            self.grid_image.save(filepath, dpi=(300, 300))
-
-# ============================== FASTAPI ==============================
+# ==================== ROTAS API ====================
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Ajuste em produção
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# ----------------- Modelos de requisição -----------------
-class SessionResponse(BaseModel):
-    session_id: str
 
 class ParamsUpdate(BaseModel):
     max_colors: Optional[int] = None
     grid_width_cells: Optional[int] = None
     brightness: Optional[float] = None
     contrast: Optional[float] = None
-    zoom: Optional[float] = None
+    saturation: Optional[float] = None
+    gamma: Optional[float] = None
+    posterize: Optional[int] = None
     highlighted_row: Optional[int] = None
 
 class ColorReplace(BaseModel):
@@ -299,11 +309,20 @@ class ColorReplace(BaseModel):
 class ColorDelete(BaseModel):
     index: int
 
-class SimplifyRequest(BaseModel):
-    intensity: int  # 0–100
+class PaintRequest(BaseModel):
+    x: int
+    y: int
+    color_index: int
 
-# ----------------- Rotas -----------------
-@app.post("/api/session", response_model=SessionResponse)
+class PixelQuery(BaseModel):
+    x: int
+    y: int
+
+class MergeRequest(BaseModel):
+    from_index: int
+    to_index: int
+
+@app.post("/api/session")
 async def create_session():
     sid = str(uuid.uuid4())
     sessions[sid] = TramaGridSession()
@@ -311,85 +330,79 @@ async def create_session():
 
 @app.post("/api/upload/{session_id}")
 async def upload_image(session_id: str, file: UploadFile = File(...)):
-    if session_id not in sessions:
-        raise HTTPException(404, "Sessão não encontrada")
+    if session_id not in sessions: raise HTTPException(404, "Sessão expirada.")
     content = await file.read()
     sessions[session_id].load_image(content)
-    return {"message": "Imagem carregada com sucesso"}
+    return {"message": "Imagem carregada"}
 
 @app.post("/api/generate/{session_id}")
 async def generate(session_id: str):
-    if session_id not in sessions:
-        raise HTTPException(404, "Sessão não encontrada")
+    if session_id not in sessions: raise HTTPException(404, "Sessão expirada.")
     sessions[session_id].generate_grid()
     return {"message": "Grade gerada"}
 
 @app.get("/api/palette/{session_id}")
 async def palette(session_id: str):
-    if session_id not in sessions:
-        raise HTTPException(404, "Sessão não encontrada")
+    if session_id not in sessions: return []
     return sessions[session_id].get_palette_info()
 
 @app.post("/api/params/{session_id}")
 async def update_params(session_id: str, data: ParamsUpdate):
-    if session_id not in sessions:
-        raise HTTPException(404, "Sessão não encontrada")
+    if session_id not in sessions: raise HTTPException(404, "Sessão expirada.")
     s = sessions[session_id]
-    if data.max_colors is not None:
-        s.max_colors = data.max_colors
-    if data.grid_width_cells is not None:
-        s.grid_width_cells = data.grid_width_cells
-    if data.brightness is not None:
-        s.brightness = data.brightness
-    if data.contrast is not None:
-        s.contrast = data.contrast
-    if data.zoom is not None:
-        s.zoom = max(0.4, min(data.zoom, 8.0))
-    if data.highlighted_row is not None:
-        s.highlighted_row = data.highlighted_row
+    if data.max_colors is not None: s.max_colors = data.max_colors
+    if data.grid_width_cells is not None: s.grid_width_cells = data.grid_width_cells
+    if data.brightness is not None: s.brightness = data.brightness
+    if data.contrast is not None: s.contrast = data.contrast
+    if data.saturation is not None: s.saturation = data.saturation
+    if data.gamma is not None: s.gamma = data.gamma
+    if data.posterize is not None: s.posterize = data.posterize
+    if data.highlighted_row is not None: s.highlighted_row = data.highlighted_row
     return {"message": "Parâmetros atualizados"}
 
 @app.post("/api/color/replace/{session_id}")
-async def replace_color(session_id: str, payload: ColorReplace):
-    if session_id not in sessions:
-        raise HTTPException(404, "Sessão não encontrada")
+async def replace_color_endpoint(session_id: str, payload: ColorReplace):
+    if session_id not in sessions: raise HTTPException(404)
     sessions[session_id].replace_color(payload.index, payload.new_hex)
     return {"message": "Cor substituída"}
 
 @app.post("/api/color/delete/{session_id}")
-async def delete_color(session_id: str, payload: ColorDelete):
-    if session_id not in sessions:
-        raise HTTPException(404, "Sessão não encontrada")
+async def delete_color_endpoint(session_id: str, payload: ColorDelete):
+    if session_id not in sessions: raise HTTPException(404)
     sessions[session_id].delete_color(payload.index)
     return {"message": "Cor removida"}
 
-@app.post("/api/simplify/{session_id}")
-async def simplify(session_id: str, payload: SimplifyRequest):
-    if session_id not in sessions:
-        raise HTTPException(404, "Sessão não encontrada")
-    sessions[session_id].simplify_palette(payload.intensity)
-    return {"message": "Paleta simplificada"}
+@app.post("/api/paint/{session_id}")
+async def paint_cell_endpoint(session_id: str, payload: PaintRequest):
+    if session_id not in sessions: raise HTTPException(404)
+    sessions[session_id].paint_cell(payload.x, payload.y, payload.color_index)
+    return {"message": "Pixel pintado"}
 
-@app.post("/api/simplify-bw/{session_id}")
-async def simplify_bw(session_id: str):
-    if session_id not in sessions:
-        raise HTTPException(404, "Sessão não encontrada")
-    sessions[session_id].simplify_bw_smart()
-    return {"message": "Simplificação preto & branco inteligente aplicada"}
+@app.post("/api/merge/{session_id}")
+async def merge_colors_endpoint(session_id: str, payload: MergeRequest):
+    if session_id not in sessions: raise HTTPException(404)
+    sessions[session_id].merge_colors(payload.from_index, payload.to_index)
+    return {"message": "Cores mescladas"}
+
+@app.post("/api/query-pixel/{session_id}")
+async def query_pixel_endpoint(session_id: str, payload: PixelQuery):
+    if session_id not in sessions: raise HTTPException(404)
+    idx = sessions[session_id].get_pixel_index(payload.x, payload.y)
+    return {"index": idx}
+
+@app.post("/api/undo/{session_id}")
+async def undo_endpoint(session_id: str):
+    if session_id not in sessions: raise HTTPException(404)
+    sessions[session_id].undo()
+    return {"message": "Desfeito"}
+
+@app.get("/api/clusters/{session_id}")
+async def get_clusters(session_id: str):
+    if session_id not in sessions: return []
+    return {"clusters": sessions[session_id].suggest_clusters(threshold=50.0)}
 
 @app.get("/api/grid/{session_id}")
 async def get_grid(session_id: str):
-    if session_id not in sessions:
-        raise HTTPException(404, "Sessão não encontrada")
+    if session_id not in sessions: raise HTTPException(404)
     b64 = sessions[session_id].get_grid_base64()
     return {"image_base64": b64}
-
-# ------------------------------------------------------------------
-# Nova rota para calcular o row correto a partir do clique do usuário
-# ------------------------------------------------------------------
-class ClickData(BaseModel):
-    click_y: float   # coordenada Y do clique dentro da imagem (já com zoom aplicado)
-    zoom: float      # zoom atual no frontend
-
-
-# Executar com: uvicorn tramagrid_backend:app --reload
