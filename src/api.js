@@ -8,8 +8,10 @@ export const sessionId = ref('')
 export const eventBus = new EventTarget()
 export const activeColorIndex = ref(0) 
 
-export const mergeState = ref({ sourceIndex: null })
-
+export const mergeState = ref({ 
+  isActive: false, // Indica se o botão "Unir" está apertado
+  sourceIndex: null // A cor que foi escolhida para sumir (se houver)
+})
 // --- SESSÃO ---
 export async function createSession() {
   const res = await fetch(`${API_BASE}/api/session`, { method: 'POST' })

@@ -118,28 +118,38 @@
     const { gridX, gridY } = getGridCoords(e.clientX, e.clientY);
     if (gridX < 0 || gridY < 0) return; 
     
-    // 1. PRIORIDADE TOTAL: MODO MERGE
-    // Se o usuário selecionou uma cor para sumir na paleta, este clique define o destino.
-    if (mergeState.value.sourceIndex !== null && mergeState.value.sourceIndex !== undefined) {
+    // ============================================
+    // 1. MODO UNIR (GLOBAL) - Prioridade Máxima
+    // ============================================
+    if (mergeState.value.isActive) {
         
         const clickedIndex = await getPixelIndex(gridX, gridY);
         if (clickedIndex === -1) return;
 
-        // Validação
-        if (clickedIndex === mergeState.value.sourceIndex) {
-            alert("Você clicou na mesma cor! Escolha uma diferente para ser o destino.");
-            return;
+        if (mergeState.value.sourceIndex === null) {
+            // FASE 1: Usuário clicou para escolher a ORIGEM
+            mergeState.value.sourceIndex = clickedIndex;
+            // (A Paleta vai reagir e mudar a instrução para "Escolha o Destino")
+        } 
+        else {
+            // FASE 2: Usuário clicou para escolher o DESTINO
+            if (clickedIndex === mergeState.value.sourceIndex) {
+               alert("Você clicou na mesma cor! Clique em OUTRA cor para unir.");
+               return;
+            }
+            if (confirm("Unir essas cores?")) {
+               await mergeColors(mergeState.value.sourceIndex, clickedIndex);
+               // Finaliza o modo
+               mergeState.value.isActive = false;
+               mergeState.value.sourceIndex = null;
+               refresh();
+            }
         }
-
-        if (confirm(`Unir a cor selecionada com esta cor da imagem?`)) {
-            await mergeColors(mergeState.value.sourceIndex, clickedIndex);
-            mergeState.value.sourceIndex = null; // Reseta o estado global
-            refresh();
-        }
-        return; // PARE AQUI! Não deixe executar régua ou pincel.
+        return; // IMPORTANTE: Bloqueia Régua e Pincel
     }
+    // ============================================
 
-    // 2. RÉGUA (Só executa se NÃO for merge)
+    // 2. Comportamento Normal (Régua)
     if (currentTool.value === 'ruler') {
       const row = gridY + 1;
       highlightedRow.value = (highlightedRow.value === row) ? -1 : row;
@@ -149,39 +159,30 @@
     const clickedIndex = await getPixelIndex(gridX, gridY);
     if (clickedIndex === -1) return;
   
-    // 3. OUTRAS FERRAMENTAS
+    // 3. Ferramentas de Edição
     if (currentTool.value === 'brush') {
       await paintCell(gridX, gridY);
       refresh();
-
     } else if (currentTool.value === 'picker') {
       activeColorIndex.value = clickedIndex;
       currentTool.value = 'brush'; 
-
     } else if (currentTool.value === 'swap') {
       selectedIndexForSwap.value = clickedIndex;
       colorPickerInput.value.click();
-
     } else if (currentTool.value === 'bucket') {
+      // (Lógica do balde mantida igual...)
       const targetColor = activeColorIndex.value; 
       const sourceColor = clickedIndex; 
       if (targetColor === sourceColor) return; 
-
+      
       if (selectionRect.value) {
-          // Balde com Seleção
-          const isInside = 
-              gridX >= selectionRect.value.x && 
-              gridX < selectionRect.value.x + selectionRect.value.w &&
-              gridY >= selectionRect.value.y && 
-              gridY < selectionRect.value.y + selectionRect.value.h;
-
+          const isInside = gridX >= selectionRect.value.x && gridX < selectionRect.value.x + selectionRect.value.w && gridY >= selectionRect.value.y && gridY < selectionRect.value.y + selectionRect.value.h;
           if (isInside) {
               await replaceColorInRegion(selectionRect.value.x, selectionRect.value.y, selectionRect.value.w, selectionRect.value.h, sourceColor, targetColor);
           } else {
-              alert("O balde só funciona DENTRO da seleção ativa. Limpe a seleção (CLS) para pintar tudo.");
+              alert("O balde só funciona DENTRO da seleção. Limpe (CLS) para pintar tudo.");
           }
       } else {
-          // Balde Global
           if(confirm("Substituir essa cor na imagem INTEIRA?")) {
              await mergeColors(sourceColor, targetColor);
           }
@@ -209,53 +210,43 @@
   <div class="canvas-wrapper">
     <input type="color" ref="colorPickerInput" style="display: none" @change="onColorPicked" @click.stop />
 
-    <div v-if="mergeState.sourceIndex !== null" class="merge-overlay-warning">
-       🎯 Clique na cor de <strong>DESTINO</strong> na imagem
+    <div v-if="mergeState.isActive" class="merge-overlay-warning">
+       <span v-if="mergeState.sourceIndex === null">👆 Clique na cor para <strong>REMOVER</strong></span>
+       <span v-else>🎯 Clique na cor de <strong>DESTINO</strong></span>
     </div>
 
     <div class="tools-hud">
       <button @click="undo" title="Desfazer" class="action-btn">↩️</button>
       <div class="separator"></div>
-
       <button @click="toggleRulerTool" :class="{ active: currentTool === 'ruler' }" title="Régua">📏</button>
-      
       <div v-if="currentTool === 'ruler'" class="row-controls">
          <button @click="prevRow" class="btn-row">⬆️</button>
          <span class="row-display">{{ highlightedRow > 0 ? 'L: ' + highlightedRow : '---' }}</span>
          <button @click="nextRow" class="btn-row">⬇️</button>
       </div>
-
       <div class="separator" v-if="currentTool === 'ruler'"></div>
-      
       <template v-if="currentTool !== 'ruler'">
           <div class="smart-tool-group">
-            <button v-if="currentTool !== 'brush' && currentTool !== 'bucket' && currentTool !== 'select'" 
-              @click="currentTool = 'picker'" class="btn-smart">💧 Cor</button>
-            <button v-else @click="currentTool = 'picker'" class="btn-smart active">
-              <span class="dot" :style="{ backgroundColor: activeColorHex }"></span>
-            </button>
+            <button v-if="currentTool !== 'brush' && currentTool !== 'bucket' && currentTool !== 'select'" @click="currentTool = 'picker'" class="btn-smart">💧 Cor</button>
+            <button v-else @click="currentTool = 'picker'" class="btn-smart active"><span class="dot" :style="{ backgroundColor: activeColorHex }"></span></button>
           </div>
-    
           <div class="selection-group">
              <button @click="currentTool = 'select'" :class="{ active: currentTool === 'select' }" title="Seleção">⛝</button>
              <button v-if="selectionRect" @click="clearSelection" class="btn-clear-sel">✖</button>
           </div>
-
           <div class="mode-toggle">
              <button @click="currentTool = 'brush'" :class="{ active: currentTool === 'brush' }" title="Pincel">✏️</button>
              <button @click="currentTool = 'bucket'" :class="{ active: currentTool === 'bucket' }" title="Balde">🪣</button>
           </div>
           <button @click="currentTool = 'swap'" :class="{ active: currentTool === 'swap' }" title="Trocar Hex">🔄</button>
       </template>
-      
       <button v-else @click="currentTool = 'brush'" class="btn-edit-mode">🛠️ Editar</button>
-
       <div class="separator"></div>
       <div class="zoom-indicator">{{ Math.round(zoom * 100) }}%</div>
     </div>
 
     <div class="canvas" 
-         :style="{ cursor: mergeState.sourceIndex !== null ? 'alias' : (currentTool === 'select' ? 'crosshair' : 'default') }"
+         :style="{ cursor: mergeState.isActive ? 'alias' : (currentTool === 'select' ? 'crosshair' : 'default') }"
          @wheel.prevent="handleWheel" 
          @mousedown="onMouseDown" 
          @mousemove="onMouseMove" 
@@ -265,42 +256,19 @@
          
       <div class="transform-container" 
            :style="{ transform: `translate(${panX}px, ${panY}px) scale(${zoom})`, transformOrigin: 'top left' }">
-           
-           <img v-if="imageSrc" 
-                :src="imageSrc" 
-                @click="handleClick" 
-                draggable="false" 
-                class="pixel-art" />
-           
-           <div v-if="selectionRect" 
-                class="selection-overlay"
-                :style="{
-                    left: (50 + selectionRect.x * 22) + 'px',
-                    top: (50 + selectionRect.y * 22) + 'px',
-                    width: (selectionRect.w * 22) + 'px',
-                    height: (selectionRect.h * 22) + 'px'
-                }">
-           </div>
+           <img v-if="imageSrc" :src="imageSrc" @click="handleClick" draggable="false" class="pixel-art" />
+           <div v-if="selectionRect" class="selection-overlay" :style="{ left: (50 + selectionRect.x * 22) + 'px', top: (50 + selectionRect.y * 22) + 'px', width: (selectionRect.w * 22) + 'px', height: (selectionRect.h * 22) + 'px' }"></div>
       </div>
-
       <div v-if="!imageSrc" class="placeholder">Carregue uma imagem</div>
     </div>
   </div>
 </template>
-  
-<style scoped>
-/* Adicionei este aviso flutuante */
-.merge-overlay-warning {
-    position: absolute; top: 20px; left: 50%; transform: translateX(-50%);
-    background: rgba(230, 126, 34, 0.9); color: white;
-    padding: 10px 20px; border-radius: 30px; font-weight: bold;
-    z-index: 200; pointer-events: none;
-    box-shadow: 0 4px 15px rgba(0,0,0,0.5);
-    animation: pulse 2s infinite;
-}
-@keyframes pulse { 0% { opacity: 0.8; } 50% { opacity: 1; transform: translateX(-50%) scale(1.05); } 100% { opacity: 0.8; } }
 
-/* (Resto do CSS igual) */
+<style scoped>
+/* (Mesmos estilos de antes, garanta que merge-overlay-warning esteja lá) */
+.merge-overlay-warning { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); background: rgba(230, 126, 34, 0.9); color: white; padding: 10px 20px; border-radius: 30px; font-weight: bold; z-index: 200; pointer-events: none; box-shadow: 0 4px 15px rgba(0,0,0,0.5); animation: pulse 2s infinite; }
+@keyframes pulse { 0% { opacity: 0.8; } 50% { opacity: 1; transform: translateX(-50%) scale(1.05); } 100% { opacity: 0.8; } }
+/* ... (copie o resto do CSS anterior) ... */
 .canvas-wrapper { position: relative; width: 100%; height: 100%; overflow: hidden; background: #111; }
 .canvas { width: 100%; height: 100%; }
 .transform-container { position: absolute; top: 0; left: 0; pointer-events: none; }

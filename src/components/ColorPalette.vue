@@ -8,7 +8,7 @@
       deleteColor as apiDeleteColor,
       mergeColors,
       activeColorIndex,
-      mergeState // <--- IMPORTAR
+      mergeState // Importado
     } from "../api.js";
     import SmartMergeModal from "./SmartMergeModal.vue";
     
@@ -16,13 +16,10 @@
     const isMergeMode = ref(false);
     const showSmartModal = ref(false);
     
-    // Monitora se o merge foi cancelado ou concluído externamente (pelo Canvas)
-    watch(() => mergeState.value.sourceIndex, (newVal) => {
-      if (newVal === null && isMergeMode.value) {
-        // Se o estado limpou, mas o modo tá ativo, significa que concluiu
-        // Podemos manter o modo ativo para continuar mesclando ou desativar. 
-        // Vamos manter ativo para fluidez, mas limpar a seleção.
-      }
+    // Sincroniza estado local com global (Se o Canvas terminar o merge, desliga aqui)
+    watch(() => mergeState.value.isActive, (val) => {
+      isMergeMode.value = val;
+      if (!val) mergeState.value.sourceIndex = null;
     });
     
     async function loadPalette() {
@@ -48,39 +45,41 @@
     
     function handleColorClick(index) {
       if (isMergeMode.value) {
-        // Lógica do Merge
         if (mergeState.value.sourceIndex === null) {
-          // 1º Passo: Escolheu a cor para SUMIR
+          // 1. Escolhendo a origem na paleta
           mergeState.value.sourceIndex = index;
         } else {
-          // 2º Passo: Escolheu a cor de DESTINO (na própria paleta)
+          // 2. Escolhendo o destino na paleta
           if (index === mergeState.value.sourceIndex) {
-            // Clicou na mesma = Deselecionar
-            mergeState.value.sourceIndex = null;
-            return;
+            mergeState.value.sourceIndex = null; // Deselecionar
+          } else {
+            executeMerge(mergeState.value.sourceIndex, index);
           }
-          executeMerge(mergeState.value.sourceIndex, index);
         }
       } else {
-        // Modo Normal: Seleciona cor ativa
         activeColorIndex.value = index;
       }
     }
     
     async function executeMerge(from, to) {
-      if (!confirm("Juntar estas duas cores?")) {
-        mergeState.value.sourceIndex = null;
-        return;
-      }
+      if (!confirm("Juntar estas duas cores?")) return;
       try {
         await mergeColors(from, to);
-        mergeState.value.sourceIndex = null; // Limpa seleção
-        // isMergeMode.value = false; // Opcional: Se quiser sair do modo merge automaticamente
-      } catch (e) {
-        alert("Erro ao mesclar");
-      }
+        // Desliga tudo ao terminar com sucesso
+        mergeState.value.isActive = false; 
+        mergeState.value.sourceIndex = null;
+      } catch (e) { alert("Erro ao mesclar"); }
     }
     
+    function toggleMergeMode() {
+      const newState = !isMergeMode.value;
+      isMergeMode.value = newState;
+      // Atualiza GLOBALMENTE para o Canvas saber
+      mergeState.value.isActive = newState;
+      mergeState.value.sourceIndex = null;
+    }
+    
+    // ... (Funções editHex e deleteColor mantidas iguais) ...
     async function editHex(index, currentHex) {
       const input = document.createElement("input");
       input.type = "color";
@@ -88,15 +87,9 @@
       input.onchange = async () => { try { await replaceColor(index, input.value); } catch (e) {} };
       input.click();
     }
-    
     async function deleteColor(index) {
       if (!confirm("Deletar esta cor?")) return;
       try { await apiDeleteColor(index); } catch (e) {}
-    }
-    
-    function toggleMergeMode() {
-      isMergeMode.value = !isMergeMode.value;
-      mergeState.value.sourceIndex = null; // Reseta ao alternar
     }
     </script>
     
@@ -108,7 +101,6 @@
           <h3>Paleta ({{ palette.length }})</h3>
           <div class="buttons">
             <button class="btn-icon" @click="showSmartModal = true" title="Sugestões Automáticas">✨ Auto</button>
-            
             <button
               class="btn-toggle-merge"
               :class="{ active: isMergeMode }"
@@ -122,11 +114,12 @@
     
         <div v-if="isMergeMode" class="instructions">
           <span v-if="mergeState.sourceIndex === null">
-            Escolha a cor para <b>SUMIR</b>...
+            Selecione a cor para <b>SUMIR</b> <br/>
+            <small>(Clique aqui ou na Imagem)</small>
           </span>
           <span v-else>
-            Agora clique na cor de <b>DESTINO</b><br/>
-            <small>(Aqui ou na Imagem 🖌️)</small>
+            Agora clique na cor de <b>DESTINO</b> <br/>
+            <small>(A que vai ficar)</small>
           </span>
         </div>
     
@@ -154,7 +147,7 @@
     </template>
     
     <style scoped>
-    /* (Mantenha o CSS exatamente igual ao anterior) */
+    /* (Mantenha todo o seu CSS anterior aqui, sem alterações) */
     .color-palette { background: #1e1e1e; padding: 15px; color: white; border-radius: 8px; margin-top: 10px; }
     .header-actions { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
     .buttons { display: flex; gap: 6px; }
