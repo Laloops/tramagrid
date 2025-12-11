@@ -336,6 +336,33 @@ class TramaGridSession:
                 groups.append(current_group)
         return groups
 
+    def replace_index_in_region(self, x: int, y: int, w: int, h: int, from_index: int, to_index: int) -> None:
+        """Substitui cor A por B apenas dentro de uma área retangular."""
+        if not self.quantized: return
+        # Validações básicas
+        if from_index not in self.palette or to_index not in self.palette: return
+        if from_index == to_index: return
+        
+        self._save_state()
+        
+        img_w, img_h = self.quantized.size
+        
+        # Garante que o retângulo está dentro da imagem
+        start_x = max(0, x)
+        start_y = max(0, y)
+        end_x = min(img_w, x + w)
+        end_y = min(img_h, y + h)
+        
+        # Varre apenas a área selecionada (muito mais rápido que a imagem toda)
+        for py in range(start_y, end_y):
+            for px in range(start_x, end_x):
+                # Se o pixel for da cor 'from_index', muda para 'to_index'
+                if self.quantized.getpixel((px, py)) == from_index:
+                    self.quantized.putpixel((px, py), to_index)
+        
+        self._draw_grid()
+
+
     def get_grid_base64(self) -> str:
         if not self.grid_image: return ""
         img = self.grid_image.copy()
@@ -380,6 +407,14 @@ class ParamsUpdate(BaseModel):
     gauge_stitches: Optional[int] = None
     gauge_rows: Optional[int] = None
     show_grid: Optional[bool] = None
+    
+class RegionReplaceRequest(BaseModel):
+    x: int
+    y: int
+    w: int
+    h: int
+    from_index: int
+    to_index: int
 
 class ColorReplace(BaseModel):
     index: int
@@ -512,3 +547,12 @@ async def get_params(session_id: str):
         "show_grid": s.show_grid,
         "highlighted_row": s.highlighted_row
     }
+
+@app.post("/api/region/replace/{session_id}")
+async def region_replace_endpoint(session_id: str, payload: RegionReplaceRequest):
+    if session_id not in sessions: raise HTTPException(404)
+    sessions[session_id].replace_index_in_region(
+        payload.x, payload.y, payload.w, payload.h,
+        payload.from_index, payload.to_index
+    )
+    return {"message": "Cor substituída na região"}

@@ -7,7 +7,7 @@
   import { createSession } from './api.js'
   
   const isReady = ref(false)
-  const isSidebarOpen = ref(true) // Estado do menu lateral
+  const isSidebarOpen = ref(true) 
   
   onMounted(async () => {
     try {
@@ -34,15 +34,24 @@
         class="toggle-sidebar-floating"
         @click="isSidebarOpen = true"
         title="Abrir Menu"
-      >➤</button>
+      >
+        <span class="icon">☰</span>
+      </button>
 
-      <aside class="sidebar custom-scroll" :class="{ closed: !isSidebarOpen }">
+      <aside class="sidebar" :class="{ closed: !isSidebarOpen }">
+        
         <div class="sidebar-header">
-            <button @click="isSidebarOpen = false" class="close-btn" title="Recolher Menu">◀</button>
+            <h2 class="sidebar-title">Ferramentas</h2>
+            <button @click="isSidebarOpen = false" class="close-btn" title="Recolher Menu">
+                ✕
+            </button>
         </div>
         
-        <ProjectControls />
-        <ColorPalette />
+        <div class="sidebar-content custom-scroll">
+            <ProjectControls />
+            <ColorPalette />
+        </div>
+
       </aside>
 
       <main class="canvas-area">
@@ -53,46 +62,113 @@
 </template>
   
 <style scoped>
+/* Loading Styles */
 .loading { height: 100vh; display: flex; flex-direction: column; justify-content: center; align-items: center; background: #1a1a1a; color: #aaa; gap: 15px; }
 .spinner { width: 40px; height: 40px; border: 4px solid #333; border-top-color: #e67e22; border-radius: 50%; animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* App Layout */
 .app { height: 100vh; display: flex; flex-direction: column; background-color: #121212; }
 .main-layout { flex: 1; display: flex; overflow: hidden; position: relative; }
 
+/* --- SIDEBAR --- */
 .sidebar { 
-  width: 320px; 
+  width: 340px; /* Um pouco mais largo para conforto */
   background: #252526; 
-  padding: 20px; 
-  overflow-y: auto; 
+  border-right: 1px solid #333;
+  transition: width 0.3s cubic-bezier(0.25, 0.8, 0.25, 1); /* Animação mais suave estilo "Gemini" */
+  
+  /* Mágica do Layout Flex */
   display: flex; 
   flex-direction: column; 
-  gap: 10px;
-  border-right: 1px solid #333;
-  transition: all 0.3s ease-in-out; /* Animação suave */
-  position: relative;
+  overflow: hidden; /* Impede o conteúdo de vazar durante a animação */
 }
 
-/* Quando fechado, largura zero e padding zero */
-.sidebar.closed { width: 0; padding: 0; overflow: hidden; border: none; }
+/* Estado Fechado */
+.sidebar.closed { 
+  width: 0; 
+  border: none;
+}
 
-.sidebar-header { display: flex; justify-content: flex-end; margin-bottom: 10px; }
-.close-btn { background: none; border: none; color: #888; cursor: pointer; font-size: 1.2rem; padding: 0; }
-.close-btn:hover { color: white; }
+/* 1. Header Fixo */
+.sidebar-header { 
+  flex-shrink: 0; /* Impede que o header seja esmagado */
+  height: 55px;
+  display: flex; 
+  align-items: center; 
+  justify-content: space-between; 
+  padding: 0 20px;
+  border-bottom: 1px solid #333;
+  background-color: #252526; /* Garante que o conteúdo rolando por baixo não apareça */
+  z-index: 10;
+}
 
+.sidebar-title {
+  margin: 0;
+  font-size: 0.95rem;
+  color: #ddd;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.close-btn { 
+  background: transparent; 
+  border: none; 
+  color: #aaa; 
+  cursor: pointer; 
+  font-size: 1.1rem; 
+  width: 32px; 
+  height: 32px; 
+  border-radius: 6px;
+  display: flex; 
+  align-items: center; 
+  justify-content: center;
+  transition: all 0.2s;
+}
+.close-btn:hover { background: rgba(255,255,255,0.1); color: white; }
+
+/* 2. Conteúdo com Scroll */
+.sidebar-content {
+  flex: 1; /* Ocupa todo o espaço restante verticalmente */
+  overflow-y: auto; /* Scroll bar aparece AQUI, não na sidebar inteira */
+  padding: 20px;
+  padding-bottom: 40px; /* Espaço extra no final */
+}
+
+/* Botão Flutuante (Aparece quando fechado) */
 .toggle-sidebar-floating {
-    position: absolute; left: 10px; top: 10px; z-index: 50;
-    background: #333; color: #fff; border: 1px solid #555;
-    width: 30px; height: 30px; border-radius: 50%;
-    cursor: pointer; display: flex; align-items: center; justify-content: center;
-    box-shadow: 2px 2px 5px rgba(0,0,0,0.5);
+    position: absolute; 
+    left: 20px; 
+    top: 20px; 
+    z-index: 50;
+    
+    background: #252526; 
+    color: #fff; 
+    border: 1px solid #444;
+    
+    width: 44px; height: 44px; 
+    border-radius: 8px; /* Quadrado arredondado (Moderno) */
+    
+    cursor: pointer; 
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    transition: all 0.2s;
 }
-.toggle-sidebar-floating:hover { background: #e67e22; border-color: #e67e22; }
+.toggle-sidebar-floating:hover { 
+  background: #333; 
+  transform: translateY(-2px); 
+  border-color: #e67e22; 
+  color: #e67e22;
+}
+.icon { font-size: 1.4rem; line-height: 1; }
 
+/* Canvas Area */
 .canvas-area { flex: 1; background: #0f0f0f; overflow: hidden; position: relative; }
 
-.custom-scroll::-webkit-scrollbar { width: 8px; }
-.custom-scroll::-webkit-scrollbar-track { background: #1e1e1e; }
-.custom-scroll::-webkit-scrollbar-thumb { background: #444; border-radius: 4px; }
+/* Scrollbar Customizada */
+.custom-scroll::-webkit-scrollbar { width: 6px; }
+.custom-scroll::-webkit-scrollbar-track { background: transparent; }
+.custom-scroll::-webkit-scrollbar-thumb { background: #444; border-radius: 3px; }
 .custom-scroll::-webkit-scrollbar-thumb:hover { background: #555; }
 </style>

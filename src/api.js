@@ -8,6 +8,8 @@ export const sessionId = ref('')
 export const eventBus = new EventTarget()
 export const activeColorIndex = ref(0) 
 
+export const mergeState = ref({ sourceIndex: null })
+
 // --- SESSÃO ---
 export async function createSession() {
   const res = await fetch(`${API_BASE}/api/session`, { method: 'POST' })
@@ -118,4 +120,18 @@ export async function getParams() {
   if (!sessionId.value) return {}
   const res = await fetch(`${API_BASE}/api/params/${sessionId.value}`)
   return await res.json()
+}
+
+export async function replaceColorInRegion(x, y, w, h, fromIndex, toIndex) {
+  if (!sessionId.value) return
+  await fetch(`${API_BASE}/api/region/replace/${sessionId.value}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ 
+        x: x, y: y, w: w, h: h, 
+        from_index: fromIndex, 
+        to_index: toIndex 
+    })
+  })
+  eventBus.dispatchEvent(new Event('refresh'))
 }
