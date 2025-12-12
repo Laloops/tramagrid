@@ -5,16 +5,38 @@ import io
 import base64
 import uuid
 import math
+import stripe
+from dotenv import load_dotenv 
 from PIL import Image, ImageDraw, ImageEnhance, ImageOps
 from collections import defaultdict
-from fastapi import FastAPI, UploadFile, File, HTTPException, Response
+from fastapi import FastAPI, UploadFile, File, HTTPException, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Dict, Tuple, List, Any
+# Para o Webhook atualizar o saldo do usuário
+from supabase import create_client, Client 
+
+
+load_dotenv()
 
 # ================= CONFIGURAÇÃO DE PERSISTÊNCIA =================
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
+
+# ================= CONFIGURAÇÃO DE PAGAMENTOS E BANCO =================
+# PREENCHA COM SUAS CHAVES DO STRIPE
+stripe.api_key = os.getenv("STRIPE_API_KEY")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+# PREENCHA COM SUAS CHAVES DO SUPABASE (Para o Webhook)
+# Nota: Precisa ser a chave 'service_role' para poder editar o saldo de qualquer usuário
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+
+try:
+    supabase_admin: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+except Exception as e:
+    print(f"Aviso: Supabase Admin não configurado. Erro: {e}")
+    supabase_admin = None
 
 # Cache em memória
 sessions: Dict[str, "TramaGridSession"] = {}
@@ -216,23 +238,24 @@ class TramaGridSession:
         w, h = self.quantized.size
         for y in range(h):
             for x in range(w):
-                if self.quantized.getpixel((x, y)) in self.palette: usage[self.quantized.getpixel((x, y))] += 1
+                idx = self.quantized.getpixel((x, y))
+                if idx in self.palette: usage[idx] += 1
         return [{"index": i, "hex": f"#{r:02x}{g:02x}{b:02x}", "count": c} for i, c in sorted(usage.items(), key=lambda x: -x[1]) if i in self.palette]
 
-    def paint_cell(self, x, y, idx):
+    def paint_cell(self, x: int, y: int, idx: int) -> None:
         if not self.quantized or idx not in self.palette: return
         self._save_state()
         if 0 <= x < self.quantized.width and 0 <= y < self.quantized.height:
             self.quantized.putpixel((x, y), idx)
             self._draw_grid()
 
-    def replace_color(self, idx, hex_val):
+    def replace_color(self, idx: int, hex_val: str) -> None:
         if idx not in self.palette: return
         self._save_state()
         self.custom_palette[idx] = self.palette[idx] = (int(hex_val[1:3],16), int(hex_val[3:5],16), int(hex_val[5:7],16))
         self._draw_grid()
 
-    def delete_color(self, idx):
+    def delete_color(self, idx: int) -> None:
         if idx not in self.palette: return
         self._save_state()
         c1 = self.palette[idx]
@@ -250,7 +273,7 @@ class TramaGridSession:
             self.custom_palette.pop(idx, None)
             self._draw_grid()
 
-    def merge_colors(self, f, t):
+    def merge_colors(self, f: int, t: int) -> None:
         if not self.quantized or f not in self.palette or t not in self.palette: return
         self._save_state()
         w, h = self.quantized.size
@@ -261,12 +284,12 @@ class TramaGridSession:
         self.custom_palette.pop(f, None)
         self._draw_grid()
         
-    def get_pixel_index(self, x, y):
+    def get_pixel_index(self, x: int, y: int) -> int:
         if self.quantized and 0 <= x < self.quantized.width and 0 <= y < self.quantized.height:
             return int(self.quantized.getpixel((x,y)))
         return -1
 
-    def replace_index_in_region(self, x, y, w, h, f, t):
+    def replace_index_in_region(self, x: int, y: int, w: int, h: int, f: int, t: int) -> None:
         if not self.quantized: return
         self._save_state()
         iw, ih = self.quantized.size
@@ -291,7 +314,6 @@ class TramaGridSession:
         return base64.b64encode(buf.getvalue()).decode()
     
     def suggest_clusters(self, threshold=50.0):
-        # (Lógica simplificada para economizar linhas)
         if not self.palette: return []
         colors = list(self.palette.items())
         groups = []
@@ -303,7 +325,6 @@ class TramaGridSession:
             for j in range(i+1, len(colors)):
                 idx2, rgb2 = colors[j]
                 if idx2 in visited: continue
-                # Distância euclidiana simples
                 d = math.sqrt(sum((a-b)**2 for a,b in zip(rgb1,rgb2)))
                 if d < threshold:
                     grp.append(idx2); visited.add(idx2)
@@ -320,23 +341,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# === AQUI ESTÁ A CORREÇÃO: Função Segura ===
 def get_session_or_load(sid: str) -> TramaGridSession:
-    # 1. Tenta memória
     if sid in sessions: return sessions[sid]
-    
-    # 2. Tenta Disco
     s = TramaGridSession()
     if s.load_from_disk(sid):
         sessions[sid] = s
         print(f"✅ Sessão {sid} restaurada do disco.")
         return s
-    
-    # 3. Falha
     print(f"❌ Sessão {sid} não encontrada.")
     raise HTTPException(404, "Sessão não encontrada.")
 
-# Modelos Pydantic
 class ParamsUpdate(BaseModel):
     max_colors: int|None=None; grid_width_cells: int|None=None; brightness: float|None=None
     contrast: float|None=None; saturation: float|None=None; gamma: float|None=None
@@ -349,6 +363,11 @@ class ColDel(BaseModel): index: int
 class Merge(BaseModel): from_index: int; to_index: int
 class RegRep(BaseModel): x: int; y: int; w: int; h: int; from_index: int; to_index: int
 
+# --- PAYLOAD DE PAGAMENTO ---
+class CheckoutSession(BaseModel):
+    quantity: int
+    user_id: str
+
 @app.post("/api/session")
 def create_sess():
     sid = str(uuid.uuid4()); sessions[sid] = TramaGridSession(); sessions[sid].save_to_disk(sid)
@@ -356,7 +375,7 @@ def create_sess():
 
 @app.post("/api/upload/{sid}")
 async def up(sid: str, file: UploadFile = File(...)):
-    s = get_session_or_load(sid) # <--- USA A FUNÇÃO SEGURA
+    s = get_session_or_load(sid)
     s.load_image(await file.read()); s.generate_grid(); s.save_to_disk(sid)
     return {"ok": True}
 
@@ -365,7 +384,7 @@ def gen(sid: str): s = get_session_or_load(sid); s.generate_grid(); s.save_to_di
 
 @app.get("/api/grid/{sid}")
 def get_grid_endpoint(sid: str):
-    s = get_session_or_load(sid) # <--- AGORA RECUPERA DO DISCO SE PRECISAR
+    s = get_session_or_load(sid)
     return {"image_base64": s.get_grid_base64()}
 
 @app.get("/api/palette/{sid}")
@@ -382,7 +401,6 @@ def par(sid: str, d: ParamsUpdate):
 @app.get("/api/params/{sid}")
 def get_par(sid: str):
     s = get_session_or_load(sid)
-    # Retorna dict com os params
     return {k: getattr(s, k) for k in ["max_colors","grid_width_cells","brightness","contrast","saturation","gamma","posterize","gauge_stitches","gauge_rows","show_grid","highlighted_row"]}
 
 @app.post("/api/paint/{sid}")
@@ -409,10 +427,84 @@ def und(sid: str): s=get_session_or_load(sid); s.undo(); s.save_to_disk(sid); re
 @app.get("/api/clusters/{sid}")
 def clu(sid: str): return {"clusters": get_session_or_load(sid).suggest_clusters()}
 
-# Rota para imagem ORIGINAL (se precisar no futuro)
 @app.get("/api/original/{sid}")
 def get_original(sid: str):
     s = get_session_or_load(sid)
     if not s.original: raise HTTPException(404, "Original não encontrada")
     buf = io.BytesIO(); s.original.save(buf, "PNG")
     return {"image_base64": base64.b64encode(buf.getvalue()).decode()}
+
+# === ROTAS DE PAGAMENTO STRIPE (NOVO) ===
+
+@app.post("/api/create-checkout-session")
+async def create_checkout_session(data: CheckoutSession):
+    try:
+        # Preço Base (Segurança): R$ 5,00
+        unit_amount = 500 
+        
+        # --- TABELA DE PREÇOS NOVA ---
+        # 2 Créditos = R$ 9,90 (R$ 4,95/un) -> 495 centavos
+        if data.quantity == 2:
+            unit_amount = 495 
+            
+        # 10 Créditos = R$ 29,90 (R$ 2,99/un) -> 299 centavos
+        elif data.quantity == 10:
+            unit_amount = 299 
+            
+        # 50 Créditos = R$ 89,90 (R$ 1,79/un) -> 179 centavos (Super desconto)
+        elif data.quantity == 50:
+            unit_amount = 179 
+
+        checkout_session = stripe.checkout.Session.create(
+            payment_method_types=['card'], # Adicione 'pix' aqui se tiver ativado no painel
+            line_items=[{
+                'price_data': {
+                    'currency': 'brl',
+                    'product_data': {'name': f'{data.quantity} Créditos TramaGrid'},
+                    'unit_amount': unit_amount,
+                },
+                'quantity': data.quantity,
+            }],
+            mode='payment',
+            success_url='http://localhost:5173/buy-credits?success=true',
+            cancel_url='http://localhost:5173/buy-credits?canceled=true',
+            client_reference_id=data.user_id,
+            metadata={'credits': data.quantity}
+        )
+        return {"url": checkout_session.url}
+    except Exception as e:
+        print(f"Stripe Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/webhook")
+async def webhook_received(request: Request):
+    """Recebe o aviso do Stripe de que o pagamento foi aprovado e libera os créditos."""
+    payload = await request.body()
+    sig_header = request.headers.get('stripe-signature')
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, STRIPE_WEBHOOK_SECRET
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.error.SignatureVerificationError as e:
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    if event['type'] == 'checkout.session.completed':
+        session = event['data']['object']
+        
+        user_id = session.get('client_reference_id')
+        credits_to_add = int(session.get('metadata', {}).get('credits', 0))
+        
+        if user_id and credits_to_add > 0 and supabase_admin:
+            print(f"💰 Pagamento confirmado! +{credits_to_add} créditos para {user_id}")
+            
+            # 1. Pega saldo atual
+            res = supabase_admin.table('profiles').select('credits').eq('id', user_id).single().execute()
+            current_credits = res.data['credits'] if res.data else 0
+            
+            # 2. Soma e salva
+            supabase_admin.table('profiles').update({'credits': current_credits + credits_to_add}).eq('id', user_id).execute()
+            
+    return {"status": "success"}
