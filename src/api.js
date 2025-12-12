@@ -137,3 +137,37 @@ export async function replaceColorInRegion(x, y, w, h, fromIndex, toIndex) {
   })
   eventBus.dispatchEvent(new Event('refresh'))
 }
+
+export async function loadProjectFromSupabase(project) {
+  try {
+    // Verifica se a URL da imagem existe
+    const imageUrl = project.image_url || project.image_path
+    if (!imageUrl) throw new Error("Projeto sem imagem.")
+
+    // 1. Baixar a imagem original do Storage do Supabase
+    const response = await fetch(imageUrl)
+    const blob = await response.blob()
+    const file = new File([blob], "project_source.png", { type: "image/png" })
+
+    // 2. Iniciar uma nova sessão no Python
+    await createSession()
+
+    // 3. Enviar a imagem para o Python
+    await uploadImage(file)
+
+    // 4. Restaurar os parâmetros (Cores, Brilho, etc.)
+    if (project.settings) { // Mudamos de .params para .settings no EditorView
+        await updateParams(project.settings)
+    } else if (project.params) {
+        await updateParams(project.params) // Fallback para projetos antigos
+    }
+
+    // 5. Gerar a grade
+    await generateGrid()
+    
+    return true
+  } catch (e) {
+    console.error("Erro ao abrir projeto:", e)
+    throw e
+  }
+}
