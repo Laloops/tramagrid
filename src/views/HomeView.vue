@@ -3,6 +3,7 @@
   import { useRouter } from 'vue-router'
   import { supabase } from '../supabase' 
   import { createSession, uploadImage, eventBus } from '../api.js'
+  import { showToast } from '../toast.js' // <--- Importando o Toast
   
   const router = useRouter()
   const fileInput = ref(null)
@@ -55,7 +56,7 @@
       const { data: { user } } = await supabase.auth.getUser()
       let profile = null
 
-      // A. VERIFICAÇÃO DE SALDO (Antes de gastar processamento)
+      // A. VERIFICAÇÃO DE SALDO
       if (user) {
           profile = await getOrCreateProfile(user)
           
@@ -65,7 +66,8 @@
           const temGratis = !profile.free_generation_used
 
           if (!temCredito && !temGratis) {
-              alert("Seus créditos acabaram! 😢\nAdquira um pacote para gerar novos gráficos.")
+              // SUBSTITUÍDO: Alert por Toast
+              showToast("Seus créditos acabaram! Adquira um pacote.", "warning")
               router.push('/buy-credits')
               if (fileInput.value) fileInput.value.value = ''
               return 
@@ -74,24 +76,24 @@
           // Anônimo
           const jaUsou = localStorage.getItem(LOCAL_STORAGE_KEY)
           if (jaUsou) {
-              if (confirm("Cota de visitante esgotada.\nEntre na sua conta para continuar!")) {
-                  router.push('/login')
-              }
+              // SUBSTITUÍDO: Confirm por Toast + Redirect
+              showToast("Cota de visitante esgotada. Entre para continuar!", "info")
+              router.push('/login')
+              
               if (fileInput.value) fileInput.value.value = ''
               return
           }
       }
 
-      // B. GERAÇÃO (O trabalho pesado)
+      // B. GERAÇÃO
       await createSession()
       await uploadImage(file)
       
-      // C. COBRANÇA (Se chegou aqui, o gráfico foi gerado com sucesso)
+      // C. COBRANÇA
       if (user) {
           console.log("💰 Cobrando o usuário agora...")
           let updateData = {}
           
-          // Prioridade: Gasta o grátis primeiro, depois os créditos
           if (!profile.free_generation_used) {
               updateData = { free_generation_used: true }
           } else {
@@ -105,7 +107,7 @@
           
           if (chargeError) console.error("Erro ao cobrar:", chargeError)
           
-          // Atualiza a UI do TopToolbar imediatamente
+          // Atualiza a UI do TopToolbar
           eventBus.dispatchEvent(new Event('credits-updated'))
       
       } else {
@@ -113,11 +115,13 @@
           localStorage.setItem(LOCAL_STORAGE_KEY, 'true')
       }
 
+      showToast("Gráfico gerado com sucesso!", "success") // Feedback positivo extra
       router.push('/editor')
 
     } catch (err) {
       console.error(err)
-      alert("Erro: " + err.message)
+      // SUBSTITUÍDO: Alert de erro por Toast
+      showToast(err.message || "Erro ao processar imagem.", "error")
     } finally {
       isLoading.value = false
     }
