@@ -6,22 +6,21 @@ import base64
 import uuid
 import math
 import stripe 
+import requests # <--- NOVO: Essencial para a estabilidade do Webhook
 from dotenv import load_dotenv
-from pathlib import Path # <--- Importante para achar o caminho certo
+from pathlib import Path 
 from PIL import Image, ImageDraw, ImageEnhance, ImageOps
 from collections import defaultdict
 from fastapi import FastAPI, UploadFile, File, HTTPException, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Dict, Tuple, List, Any
-from supabase import create_client, Client 
+# REMOVEMOS: from supabase import create_client, Client (para evitar a falha de conexão global)
 
-# ================= CONFIGURAÇÃO DE AMBIENTE (ROBUSTA) =================
-# Força o Python a procurar o .env na mesma pasta deste arquivo
+# ================= CONFIGURAÇÃO DE AMBIENTE =================
 env_path = Path(__file__).resolve().parent / '.env'
 load_dotenv(dotenv_path=env_path)
 
-# Debug para você ver no terminal se carregou
 if env_path.exists():
     print(f"✅ Arquivo .env carregado de: {env_path}")
 else:
@@ -34,18 +33,14 @@ STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
-try:
-    if SUPABASE_URL and SUPABASE_SERVICE_KEY:
-        supabase_admin: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-        print("✅ Supabase Admin conectado!")
-    else:
-        print("⚠️ Variáveis do Supabase faltando no .env")
-        supabase_admin = None
-except Exception as e:
-    print(f"⚠️ Erro ao conectar Supabase: {e}")
-    supabase_admin = None
+if SUPABASE_URL and SUPABASE_SERVICE_KEY:
+    print("✅ Chaves Supabase carregadas.")
+else:
+    print("⚠️ Variáveis do Supabase faltando no .env")
 
 # ================= LÓGICA DE PROCESSAMENTO (SESSÃO) =================
+# (O código da classe TramaGridSession permanece inalterado, pois está correto)
+# ...
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 sessions: Dict[str, "TramaGridSession"] = {}
@@ -299,8 +294,9 @@ class ColDel(BaseModel): index: int
 class Merge(BaseModel): from_index: int; to_index: int
 class RegRep(BaseModel): x: int; y: int; w: int; h: int; from_index: int; to_index: int
 class CheckoutSession(BaseModel): quantity: int; user_id: str
-class UserRequest(BaseModel): user_id: str # <--- IMPORTANTE PARA O V2.0
+class UserRequest(BaseModel): user_id: str 
 
+# (ROTAS DE EDIÇÃO DE IMAGEM PERMANECEM INALTERADAS)
 @app.post("/api/session")
 def create_sess(): sid = str(uuid.uuid4()); sessions[sid] = TramaGridSession(); sessions[sid].save_to_disk(sid); return {"session_id": sid}
 
@@ -357,15 +353,31 @@ def ori(sid: str):
     if not s.original: raise HTTPException(404, "Original não encontrada")
     buf = io.BytesIO(); s.original.save(buf, "PNG"); return {"image_base64": base64.b64encode(buf.getvalue()).decode()}
 
-# === NOVA ROTA DE SEGURANÇA: CONSUMIR CRÉDITOS ===
+
+# === NOVA ROTA DE SEGURANÇA: CONSUMIR CRÉDITOS (AGORA COM REQUESTS) ===
 @app.post("/api/consume-credit")
 def consume_credit(data: UserRequest):
-    if not supabase_admin: raise HTTPException(500, "Supabase Admin não configurado.")
+    if not (SUPABASE_URL and SUPABASE_SERVICE_KEY):
+        raise HTTPException(500, "Supabase Admin não configurado para consumo.")
     
-    # 1. Buscar Perfil (Seguro)
-    res = supabase_admin.table('profiles').select('*').eq('id', data.user_id).single().execute()
-    profile = res.data
-    if not profile: raise HTTPException(404, "Perfil não encontrado.")
+    headers = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"
+    }
+
+    # 1. Buscar Perfil (SELECT)
+    url_select = f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{data.user_id}"
+    try:
+        res_select = requests.get(url_select, headers=headers)
+        res_select.raise_for_status() # Garante que erro 4xx/5xx seja pego
+        profiles = res_select.json()
+        if not profiles:
+            raise HTTPException(404, "Perfil não encontrado.")
+        
+        profile = profiles[0]
+    except Exception as e:
+        print(f"Erro SELECT Supabase: {e}")
+        raise HTTPException(500, "Erro de conexão com o banco.")
 
     # 2. Verificar Saldo
     has_free = not profile.get('free_generation_used', False)
@@ -374,7 +386,7 @@ def consume_credit(data: UserRequest):
     if not has_free and credits <= 0:
         raise HTTPException(402, "Saldo insuficiente.") # 402 = Payment Required
 
-    # 3. Descontar
+    # 3. Preparar Desconto
     update_data = {}
     if has_free:
         print(f"🎁 {data.user_id} usando geração grátis.")
@@ -383,19 +395,28 @@ def consume_credit(data: UserRequest):
         print(f"💎 {data.user_id} gastando crédito.")
         update_data = {'credits': credits - 1}
 
-    supabase_admin.table('profiles').update(update_data).eq('id', data.user_id).execute()
+    # 4. Salvar (UPDATE)
+    url_update = f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{data.user_id}"
+    update_headers = {**headers, "Content-Type": "application/json", "Prefer": "return=representation"}
+    
+    try:
+        res_update = requests.patch(url_update, headers=update_headers, json=update_data)
+        res_update.raise_for_status()
+    except Exception as e:
+        print(f"Erro UPDATE Supabase: {e}")
+        raise HTTPException(500, "Falha ao atualizar saldo.")
+    
     return {"ok": True}
 
 # === PAGAMENTOS (STRIPE) ===
 @app.post("/api/create-checkout-session")
 async def create_checkout_session(data: CheckoutSession):
     try:
-        # Preços em centavos (ex: 500 = R$ 5,00)
         unit_amount = 500 # Default fallback
         
         if data.quantity == 2: unit_amount = 495
-        elif data.quantity == 10: unit_amount = 299 # 2990 / 10
-        elif data.quantity == 50: unit_amount = 179 # 8990 / 50
+        elif data.quantity == 10: unit_amount = 299 
+        elif data.quantity == 50: unit_amount = 179
 
         checkout_session = stripe.checkout.Session.create(
             payment_method_types=['card'],
@@ -408,8 +429,9 @@ async def create_checkout_session(data: CheckoutSession):
                 'quantity': data.quantity,
             }],
             mode='payment',
-            success_url='http://localhost:5173/buy-credits?success=true',
-            cancel_url='http://localhost:5173/buy-credits?canceled=true',
+            # CORRIGIDO: URL de redirecionamento para o domínio final
+            success_url='https://tramagrid.com.br/buy-credits?success=true',
+            cancel_url='https://tramagrid.com.br/buy-credits?canceled=true',
             client_reference_id=data.user_id,
             metadata={'credits': data.quantity}
         )
@@ -422,18 +444,54 @@ async def create_checkout_session(data: CheckoutSession):
 async def webhook_received(request: Request):
     payload = await request.body()
     sig_header = request.headers.get('stripe-signature')
+    
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
-    except:
+    except Exception as e:
+        print(f"ERRO DE ASSINATURA STRIPE: {e}"); 
         raise HTTPException(400, "Webhook Error")
 
     if event['type'] == 'checkout.session.completed':
         session = event['data']['object']
         user_id = session.get('client_reference_id')
         credits_to_add = int(session.get('metadata', {}).get('credits', 0))
-        if user_id and credits_to_add > 0 and supabase_admin:
-            print(f"💰 Pagamento confirmado: +{credits_to_add} para {user_id}")
-            res = supabase_admin.table('profiles').select('credits').eq('id', user_id).single().execute()
-            current = res.data['credits'] if res.data else 0
-            supabase_admin.table('profiles').update({'credits': current + credits_to_add}).eq('id', user_id).execute()
-    return {"status": "success"}
+        
+        # Garante que as chaves de ambiente estejam presentes
+        if not (user_id and credits_to_add > 0 and SUPABASE_SERVICE_KEY and SUPABASE_URL):
+            print("FATAL: Dados ou chaves de ambiente faltando no webhook.")
+            # Não retorna 200 OK. Isso força o Stripe a tentar de novo.
+            raise HTTPException(500, "Dados incompletos.")
+
+        print(f"💰 Pagamento confirmado: +{credits_to_add} para {user_id}")
+        
+        headers = {
+            "apikey": SUPABASE_SERVICE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        # 1. BUSCAR SALDO ATUAL (SELECT)
+        url_select = f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{user_id}&select=credits"
+        try:
+            res_select = requests.get(url_select, headers=headers)
+            res_select.raise_for_status() 
+            profiles = res_select.json()
+            current_credits = profiles[0]['credits'] if profiles else 0
+        except Exception as e:
+            print(f"ERRO SELECT SUPABASE (Webhook): {e}")
+            raise HTTPException(500, "Falha ao buscar saldo para atualização.")
+        
+        # 2. ATUALIZAR SALDO (PATCH)
+        update_url = f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{user_id}"
+        new_credits = current_credits + credits_to_add
+        update_data = {'credits': new_credits}
+        
+        try:
+            res_update = requests.patch(update_url, headers=headers, json=update_data)
+            res_update.raise_for_status()
+            print(f"✅ Saldo atualizado para {new_credits} créditos.")
+        except Exception as e:
+            print(f"ERRO UPDATE SUPABASE (Webhook): {e}")
+            raise HTTPException(500, "Falha ao atualizar saldo no Supabase.")
+            
+    return {"status": "success"} # Retorna 200 OK

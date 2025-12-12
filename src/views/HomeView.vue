@@ -128,8 +128,6 @@
         <p class="subtitle">Faça upload e veja seu gráfico pronto em segundos.</p>
         
         <div class="upload-area">
-          <div v-if="showFreeBadge" class="free-badge">🎁 1ª Geração Grátis</div>
-
           <input 
             type="file" 
             ref="fileInput" 
