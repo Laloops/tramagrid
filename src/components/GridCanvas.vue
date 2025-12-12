@@ -3,9 +3,11 @@
   import { 
     getGridImage, updateParams, paintCell, getPixelIndex, 
     replaceColor, undoLastAction, mergeColors, replaceColorInRegion,
-    activeColorIndex, getPalette, mergeState // <--- Importando o estado global
+    activeColorIndex, getPalette, mergeState
   } from "../api.js";
-  
+  // IMPORTAR O TOAST E O CONFIRM
+  import { showToast, showConfirm } from "../toast.js";
+
   const imageSrc = ref("");
   const zoom = ref(1.0);
   const highlightedRow = ref(-1);
@@ -41,7 +43,6 @@
   }
   
   watch([zoom, highlightedRow], async () => {
-    // Envia -1 explicitamente para desligar a régua
     await updateParams({ highlighted_row: highlightedRow.value });
     refresh();
   });
@@ -111,7 +112,7 @@
     isSelecting.value = false;
   }
 
-  // --- AQUI ESTÁ A MÁGICA ---
+  // --- AQUI ESTÁ A MÁGICA ATUALIZADA ---
   async function handleClick(e) {
     if (isDragging.value || isSelecting.value) return; 
     
@@ -122,30 +123,33 @@
     // 1. MODO UNIR (GLOBAL) - Prioridade Máxima
     // ============================================
     if (mergeState.value.isActive) {
-        
         const clickedIndex = await getPixelIndex(gridX, gridY);
         if (clickedIndex === -1) return;
 
         if (mergeState.value.sourceIndex === null) {
-            // FASE 1: Usuário clicou para escolher a ORIGEM
+            // FASE 1: Escolha da ORIGEM
             mergeState.value.sourceIndex = clickedIndex;
-            // (A Paleta vai reagir e mudar a instrução para "Escolha o Destino")
+            showToast("Origem selecionada. Agora clique na cor de destino.", "info");
         } 
         else {
-            // FASE 2: Usuário clicou para escolher o DESTINO
+            // FASE 2: Escolha do DESTINO
             if (clickedIndex === mergeState.value.sourceIndex) {
-               alert("Você clicou na mesma cor! Clique em OUTRA cor para unir.");
+               showToast("Você clicou na mesma cor! Escolha outra.", "warning");
                return;
             }
-            if (confirm("Unir essas cores?")) {
+            
+            // SUBSTITUÍDO: confirm() por showConfirm()
+            const confirmed = await showConfirm("Unir essas cores permanentemente?");
+            
+            if (confirmed) {
                await mergeColors(mergeState.value.sourceIndex, clickedIndex);
-               // Finaliza o modo
                mergeState.value.isActive = false;
                mergeState.value.sourceIndex = null;
+               showToast("Cores unidas!", "success");
                refresh();
             }
         }
-        return; // IMPORTANTE: Bloqueia Régua e Pincel
+        return; 
     }
     // ============================================
 
@@ -165,12 +169,12 @@
       refresh();
     } else if (currentTool.value === 'picker') {
       activeColorIndex.value = clickedIndex;
-      currentTool.value = 'brush'; 
+      currentTool.value = 'brush';
+      showToast("Cor selecionada!", "info");
     } else if (currentTool.value === 'swap') {
       selectedIndexForSwap.value = clickedIndex;
       colorPickerInput.value.click();
     } else if (currentTool.value === 'bucket') {
-      // (Lógica do balde mantida igual...)
       const targetColor = activeColorIndex.value; 
       const sourceColor = clickedIndex; 
       if (targetColor === sourceColor) return; 
@@ -179,19 +183,23 @@
           const isInside = gridX >= selectionRect.value.x && gridX < selectionRect.value.x + selectionRect.value.w && gridY >= selectionRect.value.y && gridY < selectionRect.value.y + selectionRect.value.h;
           if (isInside) {
               await replaceColorInRegion(selectionRect.value.x, selectionRect.value.y, selectionRect.value.w, selectionRect.value.h, sourceColor, targetColor);
+              refresh();
           } else {
-              alert("O balde só funciona DENTRO da seleção. Limpe (CLS) para pintar tudo.");
+              showToast("Clique DENTRO da seleção para usar o balde.", "warning");
           }
       } else {
-          if(confirm("Substituir essa cor na imagem INTEIRA?")) {
+          // SUBSTITUÍDO: confirm() por showConfirm()
+          const confirmed = await showConfirm("Substituir essa cor na imagem INTEIRA?");
+          if(confirmed) {
              await mergeColors(sourceColor, targetColor);
+             showToast("Cores substituídas!", "success");
+             refresh();
           }
       }
-      refresh();
     }
   }
   
-  async function undo() { await undoLastAction(); refresh(); }
+  async function undo() { await undoLastAction(); refresh(); showToast("Desfeito!", "info"); }
   function nextRow() { highlightedRow.value += 1; }
   function prevRow() { if (highlightedRow.value > 1) highlightedRow.value -= 1; }
   function toggleRulerTool() { currentTool.value = (currentTool.value === 'ruler') ? 'brush' : 'ruler'; }
@@ -200,7 +208,11 @@
   async function onColorPicked(e) {
     const newHex = e.target.value;
     if (selectedIndexForSwap.value !== -1) {
-      try { await replaceColor(selectedIndexForSwap.value, newHex); refresh(); } 
+      try { 
+          await replaceColor(selectedIndexForSwap.value, newHex); 
+          refresh(); 
+          showToast("Cor trocada com sucesso!", "success");
+      } 
       finally { selectedIndexForSwap.value = -1; e.target.value = null; }
     }
   }
@@ -265,10 +277,9 @@
 </template>
 
 <style scoped>
-/* (Mesmos estilos de antes, garanta que merge-overlay-warning esteja lá) */
+/* (O CSS mantém-se idêntico ao original, garantindo o visual que já funcionava) */
 .merge-overlay-warning { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); background: rgba(230, 126, 34, 0.9); color: white; padding: 10px 20px; border-radius: 30px; font-weight: bold; z-index: 200; pointer-events: none; box-shadow: 0 4px 15px rgba(0,0,0,0.5); animation: pulse 2s infinite; }
 @keyframes pulse { 0% { opacity: 0.8; } 50% { opacity: 1; transform: translateX(-50%) scale(1.05); } 100% { opacity: 0.8; } }
-/* ... (copie o resto do CSS anterior) ... */
 .canvas-wrapper { position: relative; width: 100%; height: 100%; overflow: hidden; background: #111; }
 .canvas { width: 100%; height: 100%; }
 .transform-container { position: absolute; top: 0; left: 0; pointer-events: none; }
